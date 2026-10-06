@@ -2,6 +2,7 @@
 import { Command } from "commander";
 import { registerCheckCommand } from "./commands/check";
 import { registerExplainCommand } from "./commands/explain";
+import { registerSummaryHtmlCommand } from "./commands/summaryHtml";
 
 const program = new Command();
 
@@ -14,5 +15,6 @@ program
 
 registerCheckCommand(program);
 registerExplainCommand(program);
+registerSummaryHtmlCommand(program);
 
 program.parseAsync(process.argv);

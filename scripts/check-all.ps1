@@ -10,7 +10,9 @@
   "outputs_<yyyy-MM-dd_HHmmss>" folder so repeated runs never collide:
     <ReportName>.txt   human-readable findings
     <ReportName>.json  machine-readable findings
+    <ReportName>.html  formatted results page (open in a browser)
     summary_<yyyy-MM-dd_HHmmss>.csv   one row per report: name, path, score, counts, status
+    summary_<yyyy-MM-dd_HHmmss>.html  the same summary as a sortable page linking each report
 
 .PARAMETER Root
   Folder to search. Defaults to the current directory.
@@ -139,6 +141,14 @@ function Get-RepoName([System.IO.DirectoryInfo]$dir) {
     return $name
 }
 
+# Score bands: 85-100 Excellent, 65-84 Needs attention, 40-64 Poor, 0-39 Critical.
+function Get-Rating([int]$score) {
+    if ($score -ge 85) { return "Excellent" }
+    if ($score -ge 65) { return "Needs attention" }
+    if ($score -ge 40) { return "Poor" }
+    return "Critical"
+}
+
 $summary = @()
 $usedNames = @{}
 $i = 0
@@ -155,6 +165,7 @@ foreach ($dir in $reports) {
 
     $txtPath  = Join-Path $OutputDir "$fileBase.txt"
     $jsonPath = Join-Path $OutputDir "$fileBase.json"
+    $htmlPath = Join-Path $OutputDir "$fileBase.html"
 
     Write-Host "[$i/$($reports.Count)] $reportName" -ForegroundColor Cyan
     Write-Host "  reading:   $($dir.FullName)"
@@ -164,7 +175,7 @@ foreach ($dir in $reports) {
     # One run writes both outputs: readable text on stdout (stderr included
     # so load errors land in the file) and JSON via --json-out. Exit code 1
     # just means issues were found; 2 means the report couldn't be loaded.
-    & node $cli check $dir.FullName --json-out $jsonPath 2>&1 | ForEach-Object { "$_" } |
+    & node $cli check $dir.FullName --json-out $jsonPath --html $htmlPath --html-back "summary_$stamp.html" 2>&1 | ForEach-Object { "$_" } |
         Set-Content -Path $txtPath -Encoding utf8
     $exit = $LASTEXITCODE
     $secs = "{0:N1}s" -f $timer.Elapsed.TotalSeconds
@@ -174,6 +185,7 @@ foreach ($dir in $reports) {
         Repository = Get-RepoName $dir
         ReportPath = $dir.FullName
         Score      = ""
+        Rating     = ""
         Pages      = ""
         Visuals    = ""
         Issues     = ""
@@ -181,6 +193,7 @@ foreach ($dir in $reports) {
         Warnings   = ""
         Status     = ""
         OutputFile = $txtPath
+        HtmlFile   = ""
     }
 
     if ($exit -eq 2 -or -not (Test-Path $jsonPath)) {
@@ -190,7 +203,9 @@ foreach ($dir in $reports) {
         if ($firstLine) { Write-Host "  $firstLine" -ForegroundColor Red }
     } else {
         $s = (Get-Content $jsonPath -Raw | ConvertFrom-Json).summary
+        if (Test-Path $htmlPath) { $row.HtmlFile = $htmlPath }
         $row.Score   = $s.overallScore
+        $row.Rating  = Get-Rating $s.overallScore
         $row.Pages   = $s.pageCount
         $row.Visuals = $s.visualCount
         $cats = $s.byCategory.PSObject.Properties.Value
@@ -199,7 +214,7 @@ foreach ($dir in $reports) {
         $row.Issues   = $row.Failures + $row.Warnings
         $row.Status  = if ($exit -eq 1) { "Has failures" } else { "OK" }
         Write-Host " done ($secs)" -ForegroundColor Green
-        Write-Host "  result:    score $($s.overallScore)/100, $($s.pageCount) page(s), $($row.Failures) failure(s), $($row.Warnings) warning(s)"
+        Write-Host "  result:    score $($s.overallScore)/100 ($($row.Rating)), $($s.pageCount) page(s), $($row.Failures) failure(s), $($row.Warnings) warning(s)"
     }
 
     $summary += [pscustomobject]$row
@@ -209,5 +224,9 @@ $csvPath = Join-Path $OutputDir "summary_$stamp.csv"
 $summary | Export-Csv -Path $csvPath -NoTypeInformation -Encoding utf8
 
 Write-Host ("`nDone in {0:N1}s. Results in $OutputDir" -f $totalTimer.Elapsed.TotalSeconds)
+$summaryHtml = Join-Path $OutputDir "summary_$stamp.html"
+& node $cli summary-html $csvPath --out $summaryHtml --root $Root | Out-Null
+
 Write-Host "Summary: $csvPath"
+if (Test-Path $summaryHtml) { Write-Host "Summary page: $summaryHtml" }
 exit 0

@@ -5,6 +5,7 @@ import { loadPbirFromFolder } from "../io/loadFromFolder";
 import { analyze, describeVisual, ALL_CHECKS, type Category, type Severity } from "../lib/rulesEngine";
 import { PBIRParseError } from "../lib/pbirParser";
 import { buildAccessibilityDocx } from "../lib/docxReport";
+import { buildAccessibilityHtml } from "../lib/htmlReport";
 
 interface CheckOptions {
   json?: boolean;
@@ -14,6 +15,8 @@ interface CheckOptions {
   includeHidden?: boolean;
   docx?: string;
   jsonOut?: string;
+  html?: string;
+  htmlBack?: string;
 }
 
 const SEVERITY_RANK: Record<Severity, number> = { pass: 0, info: 1, warn: 2, fail: 3 };
@@ -60,6 +63,11 @@ export function registerCheckCommand(program: Command): void {
       "--json-out <path>",
       "Also write the machine-readable JSON to this file (stdout keeps the normal output)",
     )
+    .option(
+      "--html <path>",
+      "Also write a self-contained HTML page of the findings to this path (opens offline in any browser)",
+    )
+    .option("--html-back <href>", "Link the HTML page back to an index page at this relative URL")
     .action(async (path: string, opts: CheckOptions) => {
       try {
         const { report, warnings } = await loadPbirFromFolder(path, { includeHidden: opts.includeHidden });
@@ -97,6 +105,18 @@ export function registerCheckCommand(program: Command): void {
           const outPath = nodePath.resolve(opts.jsonOut);
           fs.mkdirSync(nodePath.dirname(outPath), { recursive: true });
           fs.writeFileSync(outPath, JSON.stringify({ ...result, pages }, null, 2) + "\n");
+        }
+
+        if (opts.html) {
+          const outPath = nodePath.resolve(opts.html);
+          const html = buildAccessibilityHtml(result, pages, {
+            sourcePath: nodePath.resolve(path),
+            warnings,
+            backLink: opts.htmlBack,
+          });
+          fs.mkdirSync(nodePath.dirname(outPath), { recursive: true });
+          fs.writeFileSync(outPath, html, "utf8");
+          if (!opts.json) console.log(`HTML report written to ${outPath}`);
         }
 
         if (opts.docx) {

@@ -144,6 +144,13 @@ pbir-a11y check ./MyReport --docx ./audit-findings.docx
 # still be filled in by hand in Word.
 pbir-a11y check ./MyReport --docx ./audit-findings.docx --client "Acme Corp"
 
+# Write a self-contained HTML results page (score, category tiles, issue
+# cards filterable by page and severity). Opens offline in any browser.
+pbir-a11y check ./MyReport --html ./audit.html
+
+# Also save the JSON to a file while keeping the normal terminal output
+pbir-a11y check ./MyReport --json-out ./results.json
+
 # What does a given check actually look for?
 pbir-a11y explain tabOrder
 pbir-a11y explain          # lists all categories
@@ -158,6 +165,21 @@ maximise the terminal first, or redirect to a file so nothing is lost:
 ```bash
 pbir-a11y check ./MyReport --json > results.json
 ```
+
+### Checking many reports at once
+
+`scripts/check-all.ps1` finds every `*.Report` folder (with a `definition`
+file) under a directory, checks each one, and writes a timestamped
+`outputs_<yyyy-MM-dd_HHmmss>` folder containing per-report `.txt`, `.json`
+and `.html` results, plus `summary_<stamp>.csv` and a sortable
+`summary_<stamp>.html` page that links to every report:
+
+```powershell
+.\scripts\check-all.ps1 -Root "C:\path\to\repos"
+```
+
+The summary page can also be rebuilt from any summary CSV with
+`pbir-a11y summary-html <summary.csv> --out index.html`.
 
 Exit code is `0` when nothing at or above `--fail-on` severity is found, `1`
 when something is, and `2` on a genuine error (bad path, unreadable project).
