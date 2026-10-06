@@ -9,7 +9,7 @@
   "outputs_<yyyy-MM-dd_HHmmss>" folder so repeated runs never collide:
     <ReportName>.txt   human-readable findings
     <ReportName>.json  machine-readable findings
-    summary.csv        one row per report: name, path, score, counts, status
+    summary_<yyyy-MM-dd_HHmmss>.csv   one row per report: name, path, score, counts, status
 
 .PARAMETER Root
   Folder to search. Defaults to the current directory.
@@ -37,8 +37,8 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 $Root = (Resolve-Path $Root).Path
+$stamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
 if (-not $OutputDir) {
-    $stamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
     $OutputDir = Join-Path $Root "outputs_$stamp"
 }
 
@@ -168,7 +168,7 @@ foreach ($dir in $reports) {
     $summary += [pscustomobject]$row
 }
 
-$csvPath = Join-Path $OutputDir "summary.csv"
+$csvPath = Join-Path $OutputDir "summary_$stamp.csv"
 $summary | Export-Csv -Path $csvPath -NoTypeInformation -Encoding utf8
 
 Write-Host ("`nDone in {0:N1}s. Results in $OutputDir" -f $totalTimer.Elapsed.TotalSeconds)
