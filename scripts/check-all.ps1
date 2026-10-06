@@ -4,7 +4,8 @@
   Runs pbir-a11y against every *.Report folder under a directory.
 
 .DESCRIPTION
-  Recursively finds every folder whose name ends in ".Report", runs
+  Recursively finds every folder whose name ends in ".Report" and contains
+  a "definition" file (any extension, e.g. definition.pbir), runs
   `pbir-a11y check` on each, and writes into a new timestamped
   "outputs_<yyyy-MM-dd_HHmmss>" folder so repeated runs never collide:
     <ReportName>.txt   human-readable findings
@@ -67,6 +68,7 @@ $reports = New-Object System.Collections.Generic.List[System.IO.DirectoryInfo]
 $pending = New-Object System.Collections.Generic.Stack[System.IO.DirectoryInfo]
 $pending.Push([System.IO.DirectoryInfo]::new($Root))
 $scanned = 0
+$skippedNoDef = 0
 
 while ($pending.Count -gt 0) {
     $current = $pending.Pop()
@@ -90,8 +92,16 @@ while ($pending.Count -gt 0) {
         if ($child.LinkTarget) { continue }   # symlink/junction: avoid loops
 
         if ($child.Name -cmatch $reportPattern) {
-            $reports.Add($child)
-            Write-Host "  found: $($child.FullName)"
+            # A real report has a "definition" file directly inside it (e.g.
+            # definition.pbir); without one it's a leftover from an old branch.
+            $hasDefinition = @($child.GetFiles("definition.*")).Count -gt 0
+            if ($hasDefinition) {
+                $reports.Add($child)
+                Write-Host "  found: $($child.FullName)"
+            } else {
+                $skippedNoDef++
+                Write-Host "  skipped (no definition file): $($child.FullName)" -ForegroundColor DarkYellow
+            }
         } else {
             $pending.Push($child)
         }
@@ -101,12 +111,16 @@ Write-Progress -Activity "Searching for report folders" -Completed
 
 $reports = @($reports | Sort-Object FullName)
 if ($reports.Count -eq 0) {
-    Write-Host "No *.Report folders found under $Root ($scanned folders checked)"
+    Write-Host "No *.Report folders found under $Root ($scanned folders checked, $skippedNoDef skipped with no definition file)"
     Remove-Item $OutputDir -ErrorAction SilentlyContinue
     exit 0
 }
 
-Write-Host ("Found {0} report(s) in {1} folders ({2:N1}s)`n" -f $reports.Count, $scanned, $totalTimer.Elapsed.TotalSeconds)
+Write-Host ("Found {0} report(s) in {1} folders ({2:N1}s)" -f $reports.Count, $scanned, $totalTimer.Elapsed.TotalSeconds)
+if ($skippedNoDef -gt 0) {
+    Write-Host "Skipped $skippedNoDef *.Report folder(s) with no definition file"
+}
+Write-Host ""
 
 $summary = @()
 $usedNames = @{}
