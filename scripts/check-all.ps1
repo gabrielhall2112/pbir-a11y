@@ -177,6 +177,8 @@ foreach ($dir in $reports) {
         Pages      = ""
         Visuals    = ""
         Issues     = ""
+        Failures   = ""
+        Warnings   = ""
         Status     = ""
         OutputFile = $txtPath
     }
@@ -191,10 +193,13 @@ foreach ($dir in $reports) {
         $row.Score   = $s.overallScore
         $row.Pages   = $s.pageCount
         $row.Visuals = $s.visualCount
-        $row.Issues  = $s.issueCount
+        $cats = $s.byCategory.PSObject.Properties.Value
+        $row.Failures = ($cats | Measure-Object -Property fail -Sum).Sum
+        $row.Warnings = ($cats | Measure-Object -Property warn -Sum).Sum
+        $row.Issues   = $row.Failures + $row.Warnings
         $row.Status  = if ($exit -eq 1) { "Has failures" } else { "OK" }
         Write-Host " done ($secs)" -ForegroundColor Green
-        Write-Host "  result:    score $($s.overallScore)/100, $($s.pageCount) page(s), $($s.issueCount) issue(s)"
+        Write-Host "  result:    score $($s.overallScore)/100, $($s.pageCount) page(s), $($row.Failures) failure(s), $($row.Warnings) warning(s)"
     }
 
     $summary += [pscustomobject]$row
