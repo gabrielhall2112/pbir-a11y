@@ -18,12 +18,13 @@
   },
   "dependencies": {
     "commander": "^12.1.0",
+    "docx": "^9.8.1",
     "jszip": "^3.10.1"
   },
   "devDependencies": {
-    "typescript": "^5.5.4",
+    "@types/node": "^20.14.10",
     "ts-node": "^10.9.2",
-    "@types/node": "^20.14.10"
+    "typescript": "^5.5.4"
   },
   "engines": {
     "node": ">=18"
