@@ -24,7 +24,8 @@
     npm install
     npm run build
     npm link
-    then run the script like so "pbir-a11y check C:\path\to\MyReport"
+    to run against 1 report.... "pbir-a11y check C:\path\to\MyReport"
+    for all.... "PS $usr\source\github\UCLA-ORIS\pbir-a11y> pbir-a11y check "C:\Users\GabrielHall\source\github\UCLA-ORIS\ORIS.PowerBI.Reports.AVC\"   "
 
   #>
 param(

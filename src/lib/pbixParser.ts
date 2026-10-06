@@ -36,7 +36,7 @@ export interface ParsedVisual {
   fontSizes: number[]; // every pt found
   textColors: string[];
   fillColors: string[]; // series / data colours
-  // True when a shape/textbox/image visual carries human-readable text (e.g.
+  // True when a shape/textbox/button visual carries human-readable text (e.g.
   // a label inside a rectangle). Used to decide whether to require alt text.
   hasText: boolean;
   // Fields bound to this visual, e.g. ["Sales[Amount]", "Date[Year]"]. Extracted
@@ -573,7 +573,14 @@ function extractVisual(visualContainer: any, idx: number): ParsedVisual {
     .flat()
     .map((r: any) => (r && typeof r.value === "string" ? r.value : ""))
     .filter((s: string) => s.trim().length > 0);
-  const hasText = collectedTextRuns.length > 0;
+  // Buttons and shapes keep their label as a plain literal under
+  // `text[*].properties.text` instead; it only counts when not switched off.
+  const labelTexts = (Array.isArray(objects.text) ? objects.text : [])
+    .map((entry: any) => entry?.properties)
+    .filter((p: any) => p && findBool(p.show) !== false)
+    .map((p: any) => findText(p.text))
+    .filter((s: string | null): s is string => !!s);
+  const hasText = collectedTextRuns.length > 0 || labelTexts.length > 0;
 
   // Field bindings. Power BI stores per-role projections under
   // `singleVisual.projections` as `{ Role: [{ queryRef: "Table.Col" }, ...] }`,

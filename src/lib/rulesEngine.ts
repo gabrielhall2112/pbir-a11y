@@ -191,16 +191,33 @@ function typeIs(v: ParsedVisual, ...patterns: string[]): boolean {
   return patterns.some((p) => t.includes(p));
 }
 
-// "Pure decoration" = a shape/textbox/image visual with no text inside it.
-// These are visual scaffolding (dividers, background panels, decorative
-// images) and don't need alt text. As soon as a shape carries text, screen
-// reader users need an alt-text equivalent.
+// "Pure decoration" = a shape/textbox visual with no text inside it. These
+// are visual scaffolding (dividers, background panels) and don't need alt
+// text. Images are not included: they always need alt text.
 function isPureDecoration(v: ParsedVisual): boolean {
   const t = (v.type ?? "").toLowerCase().trim();
   if (!t) return true;
+  if (t === "shapemap") return false; // a data map, not a shape
   if (new Set(["text", "label", "header", "background"]).has(t)) return !v.hasText;
-  const decorative = ["shape", "textbox", "image"].some((p) => t.includes(p));
+  const decorative = ["shape", "textbox"].some((p) => t.includes(p));
   return decorative && !v.hasText;
+}
+
+// UI elements (text boxes, shapes, buttons, navigators, slicers) are
+// announced by screen readers through their own visible text or title, so
+// alt text would only duplicate it. Charts, images and other data visuals
+// aren't covered here and still need alt text.
+function isSelfLabelledUi(v: ParsedVisual): boolean {
+  const t = (v.type ?? "").toLowerCase().trim();
+  if (t === "shapemap") return false;
+  const isUi = typeIs(v, "textbox", "shape", "button", "navigator", "slicer")
+    || ["text", "label", "header"].includes(t);
+  if (!isUi) return false;
+  if (v.titleText && v.titleVisible) return true;
+  // Navigators render page/bookmark names and slicers render their values
+  // as text, so they always carry readable content.
+  if (typeIs(v, "navigator", "slicer")) return true;
+  return v.hasText;
 }
 
 // Visuals that don't take a chart-style title (shapes, buttons, nav, slicers,
@@ -217,10 +234,14 @@ function skipTitleCheck(v: ParsedVisual): boolean {
 // ---- Per-visual rules ----
 
 function altTextRule(v: ParsedVisual): Issue | null {
-  // Only skip pure decoration (empty shapes, textboxes, images). Buttons,
-  // navigators, slicers and shapes-containing-text DO need alt text so screen
-  // reader users get an equivalent of what sighted users see.
-  if (isPureDecoration(v)) return null;
+  // Skip pure decoration (empty shapes, textboxes, images) and UI elements
+  // whose own text or title is already read by screen readers. Charts,
+  // images and data visuals DO need alt text so screen reader users get an
+  // equivalent of what sighted users see.
+  if (isPureDecoration(v) || isSelfLabelledUi(v)) return null;
+  // An image hidden from the tab order is how authors mark it decorative
+  // (logos, backgrounds), so screen readers skip it anyway.
+  if (typeIs(v, "image") && v.isHiddenFromTabOrder) return null;
   if (!v.altText) {
     return {
       id: `${v.id}-alt-missing`,
