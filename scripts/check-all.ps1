@@ -49,22 +49,63 @@ if (-not (Test-Path $cli)) {
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $outputFull = (Resolve-Path $OutputDir).Path
 
-# Skip the outputs folder itself and folders that never contain reports.
-$skip = @("node_modules", ".git")
-$reports = Get-ChildItem -Path $Root -Directory -Recurse -Filter "*.Report" -ErrorAction SilentlyContinue |
-    Where-Object {
-        $p = $_.FullName
-        -not $p.StartsWith($outputFull, [System.StringComparison]::OrdinalIgnoreCase) -and
-        -not ($skip | Where-Object { $p -match "[\\/]$([regex]::Escape($_))([\\/]|$)" })
-    } |
-    Sort-Object FullName
+# A report folder is "<some name>.Report" -- case-sensitive, with at least
+# one character before ".Report".
+$reportPattern = '^.+\.Report$'
 
-if (-not $reports) {
-    Write-Host "No *.Report folders found under $Root"
-    return
+# Folders that never contain reports, plus previous outputs_* runs.
+$skipNames   = @("node_modules", ".git")
+$skipPattern = '^outputs(_\d{4}-\d{2}-\d{2}_\d{6})?$'
+
+$totalTimer = [System.Diagnostics.Stopwatch]::StartNew()
+Write-Host "Searching for report folders under $Root ..."
+
+# Walk the tree ourselves so we can show progress, skip junk folders, and
+# avoid descending into a report once we've found it.
+$reports = New-Object System.Collections.Generic.List[System.IO.DirectoryInfo]
+$pending = New-Object System.Collections.Generic.Stack[System.IO.DirectoryInfo]
+$pending.Push([System.IO.DirectoryInfo]::new($Root))
+$scanned = 0
+
+while ($pending.Count -gt 0) {
+    $current = $pending.Pop()
+    $scanned++
+    if ($scanned % 200 -eq 0) {
+        Write-Progress -Activity "Searching for report folders" `
+            -Status "$scanned folders checked, $($reports.Count) report(s) found" `
+            -CurrentOperation $current.FullName
+    }
+
+    try {
+        $children = $current.GetDirectories()
+    } catch {
+        Write-Host "  skipped (can't open): $($current.FullName)" -ForegroundColor DarkYellow
+        continue
+    }
+
+    foreach ($child in $children) {
+        if ($child.FullName -eq $outputFull) { continue }
+        if ($skipNames -contains $child.Name -or $child.Name -cmatch $skipPattern) { continue }
+        if ($child.LinkTarget) { continue }   # symlink/junction: avoid loops
+
+        if ($child.Name -cmatch $reportPattern) {
+            $reports.Add($child)
+            Write-Host "  found: $($child.FullName)"
+        } else {
+            $pending.Push($child)
+        }
+    }
+}
+Write-Progress -Activity "Searching for report folders" -Completed
+
+$reports = @($reports | Sort-Object FullName)
+if ($reports.Count -eq 0) {
+    Write-Host "No *.Report folders found under $Root ($scanned folders checked)"
+    Remove-Item $OutputDir -ErrorAction SilentlyContinue
+    exit 0
 }
 
-Write-Host "Found $($reports.Count) report(s) under $Root`n"
+Write-Host ("Found {0} report(s) in {1} folders ({2:N1}s)`n" -f $reports.Count, $scanned, $totalTimer.Elapsed.TotalSeconds)
 
 $summary = @()
 $usedNames = @{}
@@ -72,7 +113,7 @@ $i = 0
 
 foreach ($dir in $reports) {
     $i++
-    $reportName = $dir.Name -replace '\.Report$', ''
+    $reportName = $dir.Name -creplace '\.Report$', ''
 
     # Two reports can share a name in different folders; suffix _2, _3, ...
     $fileBase = $reportName
@@ -83,16 +124,18 @@ foreach ($dir in $reports) {
     $txtPath  = Join-Path $OutputDir "$fileBase.txt"
     $jsonPath = Join-Path $OutputDir "$fileBase.json"
 
-    Write-Host "[$i/$($reports.Count)] $reportName" -NoNewline
+    Write-Host "[$i/$($reports.Count)] $reportName" -ForegroundColor Cyan
+    Write-Host "  reading:   $($dir.FullName)"
+    Write-Host "  analyzing..." -NoNewline
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
 
-    # Readable output (stderr included so load errors show up in the file).
-    & node $cli check $dir.FullName 2>&1 | ForEach-Object { "$_" } |
+    # One run writes both outputs: readable text on stdout (stderr included
+    # so load errors land in the file) and JSON via --json-out. Exit code 1
+    # just means issues were found; 2 means the report couldn't be loaded.
+    & node $cli check $dir.FullName --json-out $jsonPath 2>&1 | ForEach-Object { "$_" } |
         Set-Content -Path $txtPath -Encoding utf8
-
-    # JSON output, used for the score. Exit code 1 just means issues were
-    # found; 2 means the report couldn't be loaded.
-    $json = & node $cli check $dir.FullName --json 2>$null
     $exit = $LASTEXITCODE
+    $secs = "{0:N1}s" -f $timer.Elapsed.TotalSeconds
 
     $row = [ordered]@{
         ReportName = $reportName
@@ -105,19 +148,20 @@ foreach ($dir in $reports) {
         OutputFile = $txtPath
     }
 
-    if ($exit -eq 2 -or -not $json) {
+    if ($exit -eq 2 -or -not (Test-Path $jsonPath)) {
         $row.Status = "Error (see output file)"
-        if (Test-Path $jsonPath) { Remove-Item $jsonPath }
-        Write-Host "  -> error" -ForegroundColor Red
+        $firstLine = Get-Content $txtPath -TotalCount 1
+        Write-Host " error ($secs)" -ForegroundColor Red
+        if ($firstLine) { Write-Host "  $firstLine" -ForegroundColor Red }
     } else {
-        $json | Set-Content -Path $jsonPath -Encoding utf8
-        $s = ($json | Out-String | ConvertFrom-Json).summary
+        $s = (Get-Content $jsonPath -Raw | ConvertFrom-Json).summary
         $row.Score   = $s.overallScore
         $row.Pages   = $s.pageCount
         $row.Visuals = $s.visualCount
         $row.Issues  = $s.issueCount
         $row.Status  = if ($exit -eq 1) { "Has failures" } else { "OK" }
-        Write-Host "  -> score $($s.overallScore)/100, $($s.issueCount) issue(s)"
+        Write-Host " done ($secs)" -ForegroundColor Green
+        Write-Host "  result:    score $($s.overallScore)/100, $($s.pageCount) page(s), $($s.issueCount) issue(s)"
     }
 
     $summary += [pscustomobject]$row
@@ -126,6 +170,6 @@ foreach ($dir in $reports) {
 $csvPath = Join-Path $OutputDir "summary.csv"
 $summary | Export-Csv -Path $csvPath -NoTypeInformation -Encoding utf8
 
-Write-Host "`nDone. Results in $OutputDir"
+Write-Host ("`nDone in {0:N1}s. Results in $OutputDir" -f $totalTimer.Elapsed.TotalSeconds)
 Write-Host "Summary: $csvPath"
 exit 0

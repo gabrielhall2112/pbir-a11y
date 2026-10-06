@@ -13,6 +13,7 @@ interface CheckOptions {
   page?: string;
   includeHidden?: boolean;
   docx?: string;
+  jsonOut?: string;
 }
 
 const SEVERITY_RANK: Record<Severity, number> = { pass: 0, info: 1, warn: 2, fail: 3 };
@@ -55,6 +56,10 @@ export function registerCheckCommand(program: Command): void {
       "--docx <path>",
       "Also write a formatted Word document of the findings to this path, suitable for sharing with a client or stakeholder",
     )
+    .option(
+      "--json-out <path>",
+      "Also write the machine-readable JSON to this file (stdout keeps the normal output)",
+    )
     .action(async (path: string, opts: CheckOptions) => {
       try {
         const { report, warnings } = await loadPbirFromFolder(path, { includeHidden: opts.includeHidden });
@@ -86,6 +91,12 @@ export function registerCheckCommand(program: Command): void {
           process.stdout.write(JSON.stringify({ ...result, pages }, null, 2) + "\n");
         } else {
           printHuman(result, pages, warnings);
+        }
+
+        if (opts.jsonOut) {
+          const outPath = nodePath.resolve(opts.jsonOut);
+          fs.mkdirSync(nodePath.dirname(outPath), { recursive: true });
+          fs.writeFileSync(outPath, JSON.stringify({ ...result, pages }, null, 2) + "\n");
         }
 
         if (opts.docx) {
