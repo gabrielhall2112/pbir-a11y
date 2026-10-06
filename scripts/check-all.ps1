@@ -122,6 +122,23 @@ if ($skippedNoDef -gt 0) {
 }
 Write-Host ""
 
+# Repository = the nearest parent folder containing ".git" (a folder, or a
+# file for worktrees/submodules). Blank if the report isn't in a repo.
+$repoCache = @{}
+function Get-RepoName([System.IO.DirectoryInfo]$dir) {
+    $d = $dir
+    $visited = @()
+    while ($d) {
+        if ($repoCache.ContainsKey($d.FullName)) { $name = $repoCache[$d.FullName]; break }
+        $visited += $d.FullName
+        if (Test-Path -LiteralPath (Join-Path $d.FullName ".git")) { $name = $d.Name; break }
+        $d = $d.Parent
+    }
+    if (-not $d) { $name = "" }
+    foreach ($v in $visited) { $repoCache[$v] = $name }
+    return $name
+}
+
 $summary = @()
 $usedNames = @{}
 $i = 0
@@ -154,6 +171,7 @@ foreach ($dir in $reports) {
 
     $row = [ordered]@{
         ReportName = $reportName
+        Repository = Get-RepoName $dir
         ReportPath = $dir.FullName
         Score      = ""
         Pages      = ""
