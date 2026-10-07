@@ -96,15 +96,37 @@ async function synthesiseLayoutFromSplitFiles(
         f.name.toLowerCase().startsWith(pageDir.toLowerCase()) &&
         /visuals\/[^/]+\/visual\.json$/i.test(f.name),
     );
-    const visualContainers: any[] = [];
+    const parsedVisuals: { vf: JSZip.JSZipObject; v: any }[] = [];
     for (const vf of visualFiles) {
-      let v: any;
       try {
-        v = JSON.parse(decodeText(await vf.async("uint8array")));
+        parsedVisuals.push({ vf, v: JSON.parse(decodeText(await vf.async("uint8array"))) });
       } catch {
         warnings.push(`Skipped unreadable visual "${vf.name}".`);
-        continue;
       }
+    }
+
+    // Visual groups are containers, not visuals: they have their own tab
+    // sequence for their children but nothing to check themselves. Hiding a
+    // group (Selection pane eye icon) hides everything inside it.
+    const byName = new Map<string, any>();
+    for (const { v } of parsedVisuals) if (v?.name) byName.set(String(v.name), v);
+    const isHiddenWithAncestors = (v: any): boolean => {
+      const seen = new Set<string>();
+      let cur = v;
+      while (cur) {
+        if (cur.isHidden === true) return true;
+        const parent = cur.parentGroupName;
+        if (!parent || seen.has(parent)) return false;
+        seen.add(parent);
+        cur = byName.get(String(parent));
+      }
+      return false;
+    };
+
+    const visualContainers: any[] = [];
+    for (const { vf, v } of parsedVisuals) {
+      if (v.visualGroup) continue;
+      if (isHiddenWithAncestors(v)) continue;
       const pos = v.position ?? {};
       const visual = v.visual ?? v;
       // Modern PBIR stores tab order at a few possible locations. Forward all
@@ -135,6 +157,7 @@ async function synthesiseLayoutFromSplitFiles(
         width: Number(pos.width ?? 0),
         height: Number(pos.height ?? 0),
         tabOrder,
+        parentGroupName: v.parentGroupName ?? null,
         rawVisual: v,
         // The PBIX parser expects `config` to be a JSON string OR object  - 
         // expand() handles both. Pass an object directly for safety.
@@ -148,6 +171,7 @@ async function synthesiseLayoutFromSplitFiles(
       width: Number(pageJson.width ?? pageJson.height ?? 0) || undefined,
       height: Number(pageJson.height ?? 0) || undefined,
       visibility: pageJson.visibility === "HiddenInViewMode" || pageJson.hidden ? 1 : 0,
+      background: pageJson.objects?.background ?? null,
       visualContainers,
     });
   }

@@ -1,16 +1,15 @@
 // Font scaling rule based on the Smart Frames blog (Apr 2026).
-// Baseline: 12pt minimum at 1280×720. Scales proportionally with canvas diagonal
-// so fonts remain legible on larger canvases (e.g. 1920×1080, 4K).
+// Baseline: 12pt minimum at 1280×720. Scales proportionally with canvas
+// width so fonts remain legible on wider canvases (e.g. 1920×1080, 4K).
+// Height is ignored: a taller page (1280×1250) is a scrolling page shown
+// fit-to-width, not a larger screen, so its text renders at the same size.
 
 const BASE_W = 1280;
-const BASE_H = 720;
 const BASE_MIN_PT = 12;
-const BASE_DIAG = Math.hypot(BASE_W, BASE_H);
 
-export function minFontPt(canvasW: number, canvasH: number): number {
-  if (!canvasW || !canvasH) return BASE_MIN_PT;
-  const diag = Math.hypot(canvasW, canvasH);
-  const scaled = BASE_MIN_PT * (diag / BASE_DIAG);
+export function minFontPt(canvasW: number, _canvasH?: number): number {
+  if (!canvasW) return BASE_MIN_PT;
+  const scaled = BASE_MIN_PT * (canvasW / BASE_W);
   // Round up to nearest 0.5pt, never below baseline.
   return Math.max(BASE_MIN_PT, Math.round(scaled * 2) / 2);
 }

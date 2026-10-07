@@ -39,6 +39,18 @@ export interface ParsedVisual {
   // True when a shape/textbox/button visual carries human-readable text (e.g.
   // a label inside a rectangle). Used to decide whether to require alt text.
   hasText: boolean;
+  /** True when the title is actually rendered (explicit show, else the
+   *  per-type Power BI default). Used for font/contrast; `titleVisible`
+   *  keeps the title rule's own semantics. */
+  titleShown: boolean;
+  /** Slicer header or card value label that names the visual, when shown
+   *  (both are on by default). null for types that have neither. */
+  builtInLabelVisible: boolean | null;
+  /** True when a click action (visualLink: page navigation, bookmark,
+   *  drill-through, URL...) is switched on. */
+  hasAction: boolean;
+  /** Visual group this visual sits in; each group has its own tab sequence. */
+  parentGroupName: string | null;
   // Fields bound to this visual, e.g. ["Sales[Amount]", "Date[Year]"]. Extracted
   // from singleVisual.projections / prototypeQuery so we can identify visuals
   // that share a type or have no title.
@@ -430,18 +442,177 @@ function normalisePowerBiLayoutTabOrder(visuals: ParsedVisual[]): ParsedVisual[]
   });
 }
 
+// ---- Rendered-property helpers ----
+// Power BI keeps formatting for things that aren't drawn: switched-off
+// objects, hover/press states, empty text runs, colour overrides for fields
+// no longer in the visual. These helpers read only what is rendered.
+
+const STATE_SELECTORS = new Set(["hover", "press", "pressed", "disabled"]);
+
+function isBaseEntry(entry: any): boolean {
+  const s = entry?.selector;
+  return !s || s.id === "default";
+}
+
+/** Whether an object (e.g. objects.labels) is switched off on its base entry. */
+function objectSwitchedOff(entries: any, defaultOn = true): boolean {
+  if (!Array.isArray(entries)) return !defaultOn;
+  for (const e of entries) {
+    if (!isBaseEntry(e)) continue;
+    const b = findBool(e?.properties?.show);
+    if (b != null) return !b;
+  }
+  return !defaultOn;
+}
+
+/** Entries of an object that are rendered (not a transient state, not switched off). */
+function renderedEntries(entries: any, defaultOn = true): any[] {
+  if (!Array.isArray(entries) || objectSwitchedOff(entries, defaultOn)) return [];
+  return entries.filter((e) => {
+    const id = e?.selector?.id;
+    if (id && STATE_SELECTORS.has(id)) return false;
+    if (!isBaseEntry(e) && findBool(e?.properties?.show) === false) return false;
+    return true;
+  });
+}
+
+function collectRenderedFontSizes(objects: any, skip: Set<string>, defaultOff: Set<string>): number[] {
+  const out: number[] = [];
+  const walk = (node: any) => {
+    if (node == null || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    for (const k of Object.keys(node)) {
+      const val = node[k];
+      if (k === "textRuns" && Array.isArray(val)) {
+        // Whitespace-only runs (spacer lines) render nothing readable.
+        for (const run of val) {
+          if (typeof run?.value === "string" && run.value.trim() === "") continue;
+          walk(run);
+        }
+      } else if (k === "fontSize") {
+        const n = findNumber(val);
+        if (n != null) out.push(n);
+      } else {
+        walk(val);
+      }
+    }
+  };
+  for (const [name, entries] of Object.entries(objects ?? {})) {
+    if (skip.has(name)) continue;
+    for (const e of renderedEntries(entries, !defaultOff.has(name))) walk(e?.properties);
+  }
+  return out;
+}
+
+/** Bound fields as lowercase "entity.property" and queryRef strings. */
+function boundFieldRefs(single: any): Set<string> {
+  const refs = new Set<string>();
+  const sources = [single?.projections, single?.prototypeQuery];
+  for (const src of sources) {
+    collect(src, (k, val) => (k === "queryRef" || k === "nativeQueryRef") && typeof val === "string")
+      .forEach((v: string) => refs.add(v.toLowerCase()));
+    collect(src, (k) => k === "Column" || k === "Measure").forEach((node: any) => {
+      const entity = node?.Expression?.SourceRef?.Entity;
+      if (entity && node?.Property) refs.add(`${entity}.${node.Property}`.toLowerCase());
+    });
+  }
+  return refs;
+}
+
+/** A dataPoint colour override is stale when it targets a field no longer bound to the visual. */
+function isStaleDataPointEntry(entry: any, refs: Set<string>): boolean {
+  const sel = entry?.selector;
+  if (!sel || refs.size === 0) return false;
+  if (typeof sel.metadata === "string") return !refs.has(sel.metadata.toLowerCase());
+  if (sel.data) {
+    const cols = collect(sel.data, (k) => k === "Column")
+      .map((c: any) => {
+        const entity = c?.Expression?.SourceRef?.Entity;
+        return entity && c?.Property ? `${entity}.${c.Property}`.toLowerCase() : null;
+      })
+      .filter((s: string | null): s is string => !!s);
+    if (cols.length > 0) return !cols.some((c: string) => refs.has(c));
+  }
+  return false;
+}
+
+// Objects whose colours are backgrounds/chrome rather than data marks.
+const NON_DATA_COLOUR_OBJECTS = new Set([
+  "background", "border", "dropShadow", "title", "subTitle", "divider",
+  "visualHeader", "fillCustom", "outline", "spacing", "padding",
+]);
+const DATA_COLOUR_KEYS = ["fill", "fillColor", "foreground", "markerColor"];
+
+function collectDataColours(objects: any, refs: Set<string>): string[] {
+  const out = new Set<string>();
+  for (const [name, entries] of Object.entries(objects ?? {})) {
+    if (NON_DATA_COLOUR_OBJECTS.has(name)) continue;
+    for (const e of renderedEntries(entries)) {
+      if (name === "dataPoint" && isStaleDataPointEntry(e, refs)) continue;
+      const props = e?.properties ?? {};
+      const transparency = findNumber(props.transparency ?? props.fillTransparency);
+      if (transparency != null && transparency >= 100) continue;
+      for (const key of DATA_COLOUR_KEYS) {
+        if (props[key] != null) findColors(props[key]).forEach((c) => out.add(c));
+      }
+    }
+  }
+  return Array.from(out);
+}
+
+function hexToRgb(hex: string): [number, number, number] | null {
+  const m = /^#?([0-9a-f]{6})/i.exec(hex);
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+/** Composite `fg` at `opacity` (0–1) over `bg`. */
+function blendHex(fg: string, bg: string, opacity: number): string {
+  const a = hexToRgb(fg);
+  const b = hexToRgb(bg);
+  if (!a || !b) return fg;
+  const mix = a.map((c, i) => Math.round(c * opacity + b[i] * (1 - opacity)));
+  return "#" + mix.map((c) => c.toString(16).padStart(2, "0")).join("").toUpperCase();
+}
+
+/** Resolve a background object to the colour actually seen, or null when not drawn. */
+function resolveBackground(entries: any, defaultOn: boolean, behind: string): string | null {
+  const base = Array.isArray(entries) ? entries.find(isBaseEntry) : null;
+  const props = base?.properties ?? {};
+  if (!(findBool(props.show) ?? defaultOn)) return null;
+  const color = findColor(props.color) ?? "#FFFFFF"; // theme default
+  const transparency = Math.min(100, Math.max(0, findNumber(props.transparency) ?? 0));
+  if (transparency >= 100) return null;
+  return blendHex(color, behind, 1 - transparency / 100);
+}
+
+/** Page canvas colour as seen behind visuals (Power BI default: white). */
+export function resolvePageBackground(entries: any): string {
+  return resolveBackground(entries, true, "#FFFFFF") ?? "#FFFFFF";
+}
+
+// Visual types whose title / background are off unless the author turns them on.
+const TITLE_DEFAULT_OFF = ["slicer", "card", "textbox", "shape", "image", "button", "navigator", "textfilter"];
+const BACKGROUND_DEFAULT_OFF = ["shape", "textbox", "image", "button", "navigator"];
+
 // ---- Visual extraction ----
 
-function extractVisual(visualContainer: any, idx: number): ParsedVisual {
+function extractVisual(visualContainer: any, idx: number, pageBackground = "#FFFFFF"): ParsedVisual {
   const cfg = expand(visualContainer.config);
   const single = cfg?.singleVisual ?? {};
   const objects = single.objects ?? {};
   const vcObjects = single.vcObjects ?? {};
+  const typeLc = String(single.visualType ?? single.type ?? "").toLowerCase();
+  const AXIS_VISUALS = [
+    "barChart","clusteredBarChart","stackedBarChart","hundredPercentStackedBarChart",
+    "columnChart","clusteredColumnChart","stackedColumnChart","hundredPercentStackedColumnChart",
+    "lineChart","areaChart","stackedAreaChart","scatterChart","ribbonChart","waterfallChart",
+    "lineStackedColumnComboChart","lineClusteredColumnComboChart","funnel",
+  ];
+  const hasAxes = AXIS_VISUALS.includes(String(single.visualType ?? ""));
 
-  const fontSizes: number[] = [];
   const textColors = new Set<string>();
-  const fillColors = new Set<string>();
-
   const collectColors = (source: any, keys: string[], target: Set<string>) => {
     for (const key of keys) {
       collect(source, (k) => k === key).forEach((value) => {
@@ -449,16 +620,21 @@ function extractVisual(visualContainer: any, idx: number): ParsedVisual {
       });
     }
   };
-
-  // Sweep all objects for fontSize / colour / fill
-  collect(objects, (k) => k === "fontSize").forEach((v) => {
-    const n = findNumber(v);
-    if (n != null) fontSizes.push(n);
-  });
   collectColors(objects, ["color", "fontColor", "labelColor"], textColors);
   collectColors(vcObjects, ["color", "fontColor", "labelColor"], textColors);
-  collectColors(objects, ["fill", "dataPoint", "fillColor", "foreground", "markerColor"], fillColors);
-  collectColors(vcObjects, ["fill", "dataPoint", "fillColor", "foreground", "markerColor"], fillColors);
+
+  // Font sizes of text that is actually drawn. The title is handled below
+  // (its visibility default depends on the visual type); data labels on
+  // axis charts are off unless switched on.
+  const fontSizes = collectRenderedFontSizes(
+    objects,
+    new Set(["title"]),
+    new Set(hasAxes ? ["labels"] : []),
+  );
+
+  // Data-mark colours only: no backgrounds/borders, hover states, hidden
+  // objects, fully transparent fills, or overrides for unbound fields.
+  const fillColors = new Set<string>(collectDataColours(objects, boundFieldRefs(single)));
 
   // Title. Power BI stores the visual title in two places depending on the
   // visual generation:
@@ -490,47 +666,43 @@ function extractVisual(visualContainer: any, idx: number): ParsedVisual {
   }
   if (titleText) titleVisible = titleVisible || true;
 
+  // Whether the title is actually drawn: explicit show wins, otherwise the
+  // Power BI default (off for slicers, cards, text boxes, shapes, images,
+  // buttons and navigators; on for charts).
+  const explicitTitleShow = vcShow ?? legacyShow;
+  const titleShown = explicitTitleShow ?? !TITLE_DEFAULT_OFF.some((p) => typeLc.includes(p));
+
   const titleFontPt =
     (vcTitleObj ? findNumber(vcTitleObj.fontSize) : null) ??
     (legacyTitleObj ? findNumber(legacyTitleObj.fontSize) : null);
   const titleColor =
     (vcTitleObj ? findColor(vcTitleObj.fontColor ?? vcTitleObj.color) : null) ??
     (legacyTitleObj ? findColor(legacyTitleObj.fontColor ?? legacyTitleObj.color) : null);
-  if (titleFontPt != null) fontSizes.push(titleFontPt);
+  if (titleShown && titleFontPt != null) fontSizes.push(titleFontPt);
   if (titleColor) textColors.add(titleColor);
 
-  // Labels / categories / axes
+  // Labels / categories / axes (colours for the text-contrast check; their
+  // font sizes are already in the rendered sweep above).
   const labelObj = objects.labels?.[0]?.properties ?? null;
   const labelFontPt = labelObj ? findNumber(labelObj.fontSize) : null;
   const labelColor = labelObj ? findColor(labelObj.color) : null;
-  if (labelFontPt != null) fontSizes.push(labelFontPt);
   if (labelColor) textColors.add(labelColor);
 
   const catObj = objects.categoryAxis?.[0]?.properties ?? objects.categoryLabels?.[0]?.properties ?? null;
   const categoryColor = catObj ? findColor(catObj.color ?? catObj.labelColor) : null;
-  const catFontPt = catObj ? findNumber(catObj.fontSize) : null;
-  if (catFontPt != null) fontSizes.push(catFontPt);
   if (categoryColor) textColors.add(categoryColor);
 
   const axisObj = objects.valueAxis?.[0]?.properties ?? null;
   const axisColor = axisObj ? findColor(axisObj.color ?? axisObj.labelColor) : null;
-  const axisFontPt = axisObj ? findNumber(axisObj.fontSize) : null;
-  if (axisFontPt != null) fontSizes.push(axisFontPt);
   if (axisColor) textColors.add(axisColor);
 
   // Axis titles. Power BI stores per-axis "showAxisTitle" inside categoryAxis
   // (X, for column charts) and valueAxis (Y). Visuals without axes (cards,
   // slicers, pies, treemaps, KPIs, gauges, tables/matrices, maps) shouldn't
-  // be flagged.
-  const AXIS_VISUALS = [
-    "barChart","clusteredBarChart","stackedBarChart","hundredPercentStackedBarChart",
-    "columnChart","clusteredColumnChart","stackedColumnChart","hundredPercentStackedColumnChart",
-    "lineChart","areaChart","stackedAreaChart","scatterChart","ribbonChart","waterfallChart",
-    "lineStackedColumnComboChart","lineClusteredColumnComboChart","funnel",
-  ];
-  const hasAxes = AXIS_VISUALS.includes(String(single.visualType ?? ""));
+  // be flagged, and neither should an axis that is itself hidden.
   const readAxisTitleShow = (obj: any): boolean | null => {
     if (!obj) return null;
+    if (findBool(obj.show) === false) return null;
     const t = obj.showAxisTitle ?? obj.axisTitle ?? null;
     if (t == null) return null;
     const b = findBool(t);
@@ -541,9 +713,27 @@ function extractVisual(visualContainer: any, idx: number): ParsedVisual {
   const xAxisTitleVisible = hasAxes ? readAxisTitleShow(catObj) : null;
   const yAxisTitleVisible = hasAxes ? readAxisTitleShow(axisObj) : null;
 
-  // Background
-  const bgObj = vcObjects.background?.[0]?.properties ?? objects.background?.[0]?.properties ?? null;
-  const background = bgObj ? findColor(bgObj.color) : null;
+  // Background actually behind this visual's content: its own background if
+  // shown and not fully transparent (blended), otherwise the page canvas.
+  const bgDefaultOn = !BACKGROUND_DEFAULT_OFF.some((p) => typeLc.includes(p));
+  const background =
+    resolveBackground(vcObjects.background ?? objects.background, bgDefaultOn, pageBackground) ?? pageBackground;
+
+  // Slicer header / card label: on by default and names the visual.
+  let builtInLabelVisible: boolean | null = null;
+  if (typeLc.includes("slicer")) {
+    builtInLabelVisible = !objectSwitchedOff(objects.header, true);
+  } else if (typeLc === "card" || typeLc === "multirowcard") {
+    builtInLabelVisible = !objectSwitchedOff(objects.categoryLabels, true);
+  } else if (typeLc === "cardvisual") {
+    const entries = Array.isArray(objects.label) ? objects.label : [];
+    builtInLabelVisible = entries.every((e: any) => findBool(e?.properties?.show) !== false);
+  }
+
+  // Click action (page navigation, bookmark, drill-through, web URL...).
+  const hasAction = [vcObjects.visualLink, objects.visualLink].some(
+    (entries) => Array.isArray(entries) && entries.some((e: any) => findBool(e?.properties?.show) === true),
+  );
 
   // Alt text  -  Power BI stores it under vcObjects.general[0].properties.altText
   const altSources = [
@@ -663,11 +853,11 @@ function extractVisual(visualContainer: any, idx: number): ParsedVisual {
     single,
   );
 
-  // Decorative = pure shape/image with no text, no alt text, no fields, no title text.
-  const typeLc = String(visualType).toLowerCase();
-  const isShapeOrImage = ["shape", "image"].some((p) => typeLc.includes(p)) ||
+  // Decorative = pure shape/image with no text, no alt text, no fields, no
+  // title text and no click action (a shape with an action is a button).
+  const isShapeOrImage = (["shape", "image"].some((p) => typeLc.includes(p)) && typeLc !== "shapemap") ||
     ["text", "label", "header", "background"].includes(typeLc);
-  const isDecorative = isShapeOrImage && !hasText && !altText && fieldSet.size === 0 && !titleText;
+  const isDecorative = isShapeOrImage && !hasText && !altText && fieldSet.size === 0 && !titleText && !hasAction;
 
   const visualId = String(visualContainer.id ?? single.name ?? visualContainer.name ?? `v${idx}`);
   const displayName = titleText ?? String(single.name ?? visualContainer.name ?? `Visual ${idx + 1}`);
@@ -696,6 +886,12 @@ function extractVisual(visualContainer: any, idx: number): ParsedVisual {
     textColors: Array.from(textColors),
     fillColors: Array.from(fillColors),
     hasText,
+    titleShown,
+    builtInLabelVisible,
+    hasAction,
+    parentGroupName:
+      visualContainer.parentGroupName != null ? String(visualContainer.parentGroupName)
+        : cfg?.parentGroupName != null ? String(cfg.parentGroupName) : null,
     fields,
     tabOrder: tabOrderState.isHiddenFromTabOrder ? -1 : tabOrderState.tabOrderIndex,
     tabOrderIndex: tabOrderState.tabOrderIndex,
@@ -707,12 +903,16 @@ function extractVisual(visualContainer: any, idx: number): ParsedVisual {
 
 export function extractPage(section: any, canvasW: number, canvasH: number): ParsedPage {
   const cfg = expand(section.config) ?? {};
-  const visualContainers = (section.visualContainers ?? []).map((vc: any) => ({
-    ...vc,
-    config: expand(vc.config),
-    filters: expand(vc.filters),
-    query: expand(vc.query),
-  }));
+  const visualContainers = (section.visualContainers ?? [])
+    .map((vc: any) => ({
+      ...vc,
+      config: expand(vc.config),
+      filters: expand(vc.filters),
+      query: expand(vc.query),
+    }))
+    // Legacy PBIX visual groups are containers with nothing to check.
+    .filter((vc: any) => !(vc.config?.singleVisualGroup && !vc.config?.singleVisual));
+  const pageBackground = resolvePageBackground(section.background ?? cfg?.objects?.background);
 
   const pageW = Number(section.width ?? canvasW);
   const pageH = Number(section.height ?? canvasH);
@@ -738,7 +938,7 @@ export function extractPage(section: any, canvasW: number, canvasH: number): Par
     height: pageH,
     hidden: Boolean(cfg?.visibility === 1 || section.visibility === 1),
     pageTitleVisible,
-    visuals: normalisePowerBiLayoutTabOrder(visualContainers.map((vc: any, i: number) => extractVisual(vc, i))),
+    visuals: normalisePowerBiLayoutTabOrder(visualContainers.map((vc: any, i: number) => extractVisual(vc, i, pageBackground))),
   };
 }
 

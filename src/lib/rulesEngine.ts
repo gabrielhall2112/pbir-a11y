@@ -191,6 +191,21 @@ function typeIs(v: ParsedVisual, ...patterns: string[]): boolean {
   return patterns.some((p) => t.includes(p));
 }
 
+// Slicers, including custom ones whose type name doesn't say "slicer"
+// (e.g. the text-search filter "textFilter<guid>").
+function isSlicer(v: ParsedVisual): boolean {
+  return typeIs(v, "slicer", "textfilter");
+}
+
+// Text boxes, shapes, buttons, navigators and slicers: UI elements rather
+// than data visuals.
+function isUiControl(v: ParsedVisual): boolean {
+  const t = (v.type ?? "").toLowerCase().trim();
+  if (t === "shapemap") return false;
+  return typeIs(v, "textbox", "shape", "button", "navigator") || isSlicer(v)
+    || ["text", "label", "header"].includes(t);
+}
+
 // "Pure decoration" = a shape/textbox visual with no text inside it. These
 // are visual scaffolding (dividers, background panels) and don't need alt
 // text. Images are not included: they always need alt text.
@@ -208,15 +223,11 @@ function isPureDecoration(v: ParsedVisual): boolean {
 // alt text would only duplicate it. Charts, images and other data visuals
 // aren't covered here and still need alt text.
 function isSelfLabelledUi(v: ParsedVisual): boolean {
-  const t = (v.type ?? "").toLowerCase().trim();
-  if (t === "shapemap") return false;
-  const isUi = typeIs(v, "textbox", "shape", "button", "navigator", "slicer")
-    || ["text", "label", "header"].includes(t);
-  if (!isUi) return false;
+  if (!isUiControl(v)) return false;
   if (v.titleText && v.titleVisible) return true;
   // Navigators render page/bookmark names and slicers render their values
   // as text, so they always carry readable content.
-  if (typeIs(v, "navigator", "slicer")) return true;
+  if (typeIs(v, "navigator") || isSlicer(v)) return true;
   return v.hasText;
 }
 
@@ -299,6 +310,9 @@ function visualTitleRule(v: ParsedVisual): Issue | null {
   // Shapes, text boxes, images, buttons and navigators don't take a chart-
   // style title. Slicers and all data charts DO.
   if (skipTitleCheck(v)) return null;
+  // A slicer header or card label (both on by default) names the visual,
+  // so a separate title isn't needed.
+  if (v.builtInLabelVisible === true) return null;
   if (!v.titleVisible) {
     return {
       id: `${v.id}-title-off`,
@@ -393,7 +407,7 @@ function contrastChecksFor(v: ParsedVisual): { what: string; fg: string; bg: str
   const bg = v.background ?? "#FFFFFF";
   const checks: { what: string; fg: string; bg: string; ratio: number; level: string; passAA: boolean }[] = [];
   const pairs: [string, string | null, number | null][] = [
-    ["Title", v.titleColor, v.titleFontPt],
+    ["Title", v.titleShown ? v.titleColor : null, v.titleFontPt],
     ["Data labels", v.labelColor, v.labelFontPt],
     ["Category labels", v.categoryColor, null],
     ["Axis labels", v.axisColor, null],
@@ -426,7 +440,11 @@ function contrastIssues(v: ParsedVisual, checks: ReturnType<typeof contrastCheck
 // Non-text contrast (WCAG 1.4.11, AA, 3:1)  -  applies to graphical objects
 // needed to understand the content: data series fills/marks, and axis lines.
 // We check each unique series fill colour against the visual background.
+// Shapes, text boxes, images, buttons, navigators and slicers have no data
+// marks: their fills are decorative panels or backgrounds behind text,
+// which 1.4.11 doesn't cover (their text is checked under 1.4.3 instead).
 function nonTextContrastIssues(v: ParsedVisual): Issue[] {
+  if (v.isDecorative || isUiControl(v) || typeIs(v, "image")) return [];
   const bg = v.background ?? "#FFFFFF";
   const fills = Array.from(new Set(v.fillColors)).filter(Boolean);
   if (fills.length === 0) return [];
@@ -733,16 +751,19 @@ function tabOrderRulesForPage(p: ParsedPage): Issue[] {
     }
   }
 
-  // 2. Duplicate tab order values.
-  const byVal = new Map<number, typeof authored>();
+  // 2. Duplicate tab order values. Each visual group has its own tab
+  //    sequence, so values only clash within the same group (or top level).
+  const byVal = new Map<string, { t: number; entries: typeof authored }>();
   for (const e of authored) {
-    if (!byVal.has(e.t)) byVal.set(e.t, []);
-    byVal.get(e.t)!.push(e);
+    const key = `${e.v.parentGroupName ?? ""}\u0000${e.t}`;
+    if (!byVal.has(key)) byVal.set(key, { t: e.t, entries: [] });
+    byVal.get(key)!.entries.push(e);
   }
-  for (const [t, group] of byVal) {
+  for (const { t, entries: group } of byVal.values()) {
     if (group.length > 1) {
+      const scope = group[0].v.parentGroupName;
       issues.push({
-        id: `${p.id}-tab-duplicate-${t}`,
+        id: `${p.id}-tab-duplicate-${scope ? `${scope}-` : ""}${t}`,
         category: "tabOrder",
         severity: "fail",
         title: `Duplicate tab order value (${t})`,
@@ -762,11 +783,11 @@ function tabOrderRulesForPage(p: ParsedPage): Issue[] {
 // icon-only shapes acting as controls) against:
 //   - WCAG 2.5.8 minimum (24×24 CSS px)
 //   - PBIX A11y recommended usability standard (40×40 px)
-// Power BI canvases are authored at 1280×720 by default; when the canvas
-// differs we apply proportional scaling (canvasHeight / 720) so thresholds
-// match the rendered size at the authored canvas  -  mirroring the standalone
-// UI Layout Calculator.
-const BASE_CANVAS_HEIGHT = 720;
+// Power BI canvases are authored at 1280×720 by default; when the canvas is
+// wider we apply proportional scaling (canvasWidth / 1280) so thresholds
+// match the rendered size. Height is ignored: a taller page scrolls at
+// fit-to-width rather than rendering everything smaller.
+const BASE_CANVAS_WIDTH = 1280;
 const WCAG_MIN_PX = 24;
 const UX_REC_PX = 40;
 const ICON_REC_PX = 60;
@@ -774,14 +795,13 @@ const ICON_REC_PX = 60;
 function isInteractiveVisual(v: ParsedVisual): boolean {
   const t = (v.type ?? "").toLowerCase().trim();
   if (!t) return false;
-  if (typeIs(v, "button", "navigator", "slicer")) return true;
-  // Shape/image visuals that are NOT decorative and have no text label are
-  // treated as icon-only controls (a common Power BI pattern).
-  if (typeIs(v, "shape", "image") && !v.isDecorative && !v.hasText) return true;
+  if (typeIs(v, "button", "navigator") || isSlicer(v)) return true;
+  // Shapes and images are only controls when a click action is switched on.
+  if (typeIs(v, "shape", "image") && t !== "shapemap") return v.hasAction;
   return false;
 }
 
-function targetSizeRule(v: ParsedVisual, canvasH: number): Issue | null {
+function targetSizeRule(v: ParsedVisual, canvasW: number): Issue | null {
   if (!isInteractiveVisual(v)) return null;
   const w = Number(v.w) || 0;
   const h = Number(v.h) || 0;
@@ -789,9 +809,9 @@ function targetSizeRule(v: ParsedVisual, canvasH: number): Issue | null {
 
   const t = (v.type ?? "").toLowerCase().trim();
   const isIconOnly = (t.includes("shape") || t.includes("image")) && !v.hasText;
-  const isSlicer = t.includes("slicer");
+  const slicer = isSlicer(v);
 
-  const scale = canvasH > 0 ? canvasH / BASE_CANVAS_HEIGHT : 1;
+  const scale = canvasW > BASE_CANVAS_WIDTH ? canvasW / BASE_CANVAS_WIDTH : 1;
   const minThreshold = WCAG_MIN_PX * scale;
   // Icons get a larger recommended target (60×60 base); buttons/slicers/navigators keep 40×40.
   const recBase = isIconOnly ? ICON_REC_PX : UX_REC_PX;
@@ -805,7 +825,7 @@ function targetSizeRule(v: ParsedVisual, canvasH: number): Issue | null {
   const wcagNote = failsWcag
     ? `Below WCAG 2.5.8 minimum (24×24 px, interpreted via UI measurement) and below the recommended ${recLabel}.`
     : `Meets WCAG 2.5.8 minimum (24×24 px, interpreted via UI measurement) but below the recommended ${recLabel}.`;
-  const slicerNote = isSlicer
+  const slicerNote = slicer
     ? " For slicers we measure the container; individual selectable items may be smaller and should also be checked."
     : "";
   const iconNote = isIconOnly
@@ -824,7 +844,7 @@ function targetSizeRule(v: ParsedVisual, canvasH: number): Issue | null {
     title: failsWcag
       ? `Interactive target below 24×24 px (${wDisp}×${hDisp})`
       : `Interactive target below recommended ${recLabel} (${wDisp}×${hDisp})`,
-    detail: `${describeVisual(v)} measures ${wDisp}×${hDisp} px on a ${Math.round(canvasH)}px-tall canvas (scaled thresholds: ${minRound}px minimum, ${uxRound}px recommended).${slicerNote}${iconNote}`,
+    detail: `${describeVisual(v)} measures ${wDisp}×${hDisp} px on a ${Math.round(canvasW)}px-wide canvas (scaled thresholds: ${minRound}px minimum, ${uxRound}px recommended).${slicerNote}${iconNote}`,
     why: `${wcagNote} Larger targets reduce misclicks for pointer, touch and assistive input users.`,
     fix: `Resize the element so both width and height are at least ${uxRound}px (${recLabel} at base 1280×720). In Power BI: select the visual → Format pane → General → Size, or drag the corner handles.`,
     visualId: v.id,
@@ -865,7 +885,7 @@ export function analyze(report: ParsedReport, selection: CheckSelection = ALL_CH
         issues.push(...nonTextContrastIssues(v));
       }
       if (selection.targetSize) {
-        const ts = targetSizeRule(v, effectiveH);
+        const ts = targetSizeRule(v, effectiveW);
         if (ts) issues.push(ts);
       }
       // Colour-blindness check is disabled  -  see Simulator note in UI.
