@@ -5,7 +5,7 @@
 // parser so every audit downstream works without changes.
 
 import JSZip from "jszip";
-import { buildReportFromLayout, PBIXParseError, type ParsedReport } from "./pbixParser";
+import { buildReportFromLayout, mergeThemes, PBIXParseError, type ParsedReport, type ResolvedTheme } from "./pbixParser";
 
 export class PBIRParseError extends Error {
   constructor(msg: string) {
@@ -57,6 +57,40 @@ function findAll(zip: JSZip, re: RegExp): JSZip.JSZipObject[] {
   return Object.values(zip.files).filter((f) => !f.dir && re.test(f.name));
 }
 
+/**
+ * Load the report's theme: the base theme (StaticResources/SharedResources/
+ * BaseThemes/<name>.json) with the custom theme (StaticResources/
+ * RegisteredResources/<name>) layered on top. Used to resolve theme colour
+ * references and default backgrounds.
+ */
+async function loadTheme(zip: JSZip, themeCollection: any, warnings: string[]): Promise<ResolvedTheme | null> {
+  const findThemeFile = (name: unknown): JSZip.JSZipObject | null => {
+    if (typeof name !== "string" || !name) return null;
+    const lower = name.toLowerCase();
+    const candidates = [lower, lower.endsWith(".json") ? lower : `${lower}.json`];
+    return Object.values(zip.files).find(
+      (f) => !f.dir && /staticresources\//i.test(f.name) && candidates.some((c) => f.name.toLowerCase().endsWith(`/${c}`)),
+    ) ?? null;
+  };
+  const read = async (entry: { name?: unknown } | undefined): Promise<any | null> => {
+    const file = findThemeFile(entry?.name);
+    if (!file) {
+      if (entry?.name) warnings.push(`Theme "${String(entry.name)}" not found; assuming default colours.`);
+      return null;
+    }
+    try {
+      return JSON.parse(decodeText(await file.async("uint8array")));
+    } catch {
+      warnings.push(`Theme "${String(entry?.name)}" could not be read; assuming default colours.`);
+      return null;
+    }
+  };
+  const base = await read(themeCollection?.baseTheme);
+  const custom = await read(themeCollection?.customTheme);
+  if (!base && !custom) return null;
+  return mergeThemes(base, custom);
+}
+
 /** Build a synthetic "Layout" object compatible with the PBIX parser from a
  *  modern PBIR split-file project (definition/pages/<page>/visuals/<id>/visual.json). */
 async function synthesiseLayoutFromSplitFiles(
@@ -78,6 +112,8 @@ async function synthesiseLayoutFromSplitFiles(
       /* ignore */
     }
   }
+
+  const resolvedTheme = await loadTheme(zip, themeCollection, warnings);
 
   const sections: any[] = [];
   for (const pf of pageFiles) {
@@ -172,6 +208,7 @@ async function synthesiseLayoutFromSplitFiles(
       height: Number(pageJson.height ?? 0) || undefined,
       visibility: pageJson.visibility === "HiddenInViewMode" || pageJson.hidden ? 1 : 0,
       background: pageJson.objects?.background ?? null,
+      outspace: pageJson.objects?.outspace ?? null,
       visualContainers,
     });
   }
@@ -180,6 +217,7 @@ async function synthesiseLayoutFromSplitFiles(
 
   return {
     config: themeCollection ? { themeCollection } : {},
+    resolvedTheme,
     sections,
   };
 }

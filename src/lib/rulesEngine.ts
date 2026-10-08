@@ -265,6 +265,8 @@ function altTextRule(v: ParsedVisual): Issue | null {
       visualId: v.id,
     };
   }
+  // Measure-driven alt text: present, but its wording can't be checked here.
+  if (v.altTextIsDynamic) return null;
   const t = v.altText.trim().toLowerCase();
   if (t.length < 4) {
     return {
@@ -356,33 +358,28 @@ function visualTitleRule(v: ParsedVisual): Issue | null {
   return null;
 }
 
+// xAxisTitleVisible comes from categoryAxis and yAxisTitleVisible from
+// valueAxis. On horizontal bar charts the category axis is vertical, so the
+// Format pane calls it "Y-axis" and the value axis "X-axis".
 function axisTitleRule(v: ParsedVisual): Issue[] {
   if (!v.hasAxes) return [];
+  const horizontal = typeIs(v, "barchart");
   const out: Issue[] = [];
-  if (v.xAxisTitleVisible === false) {
+  const add = (role: "category" | "value") => {
+    const name = (role === "category") !== horizontal ? "X-axis" : "Y-axis";
     out.push({
-      id: `${v.id}-x-axis-title-off`,
+      id: `${v.id}-${name.toLowerCase()}-title-off`,
       category: "axisTitles",
       severity: "warn",
-      title: "X-axis title turned off",
-      detail: `${describeVisual(v)} has no visible X-axis title.`,
+      title: `${name} title turned off`,
+      detail: `${describeVisual(v)} has no visible ${name} title.`,
       why: "Axis titles tell readers  -  and screen-reader users  -  what the axis represents and the unit of measure.",
-      fix: "Format pane → X-axis → Title → toggle On, and write a short label including the unit.",
+      fix: `Format pane → ${name} → Title → toggle On, and write a short label including the unit.`,
       visualId: v.id,
     });
-  }
-  if (v.yAxisTitleVisible === false) {
-    out.push({
-      id: `${v.id}-y-axis-title-off`,
-      category: "axisTitles",
-      severity: "warn",
-      title: "Y-axis title turned off",
-      detail: `${describeVisual(v)} has no visible Y-axis title.`,
-      why: "Axis titles tell readers  -  and screen-reader users  -  what the axis represents and the unit of measure.",
-      fix: "Format pane → Y-axis → Title → toggle On, and write a short label including the unit.",
-      visualId: v.id,
-    });
-  }
+  };
+  if (v.xAxisTitleVisible === false) add("category");
+  if (v.yAxisTitleVisible === false) add("value");
   return out;
 }
 

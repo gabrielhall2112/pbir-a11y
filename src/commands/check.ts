@@ -13,6 +13,7 @@ interface CheckOptions {
   failOn?: string;
   page?: string;
   includeHidden?: boolean;
+  skipHiddenPages?: boolean;
   docx?: string;
   jsonOut?: string;
   html?: string;
@@ -52,9 +53,10 @@ export function registerCheckCommand(program: Command): void {
     )
     .option("--page <name>", "Only show results for one page (by display name or id)")
     .option(
-      "--include-hidden",
-      "Also check pages marked hidden-in-view-mode (e.g. drillthrough/tooltip pages), which are skipped by default",
+      "--skip-hidden-pages",
+      "Skip pages marked hidden-in-view-mode. By default they are checked, since buttons, bookmarks and drillthrough still take users there",
     )
+    .option("--include-hidden", "No longer needed: hidden pages are checked by default (kept for compatibility)")
     .option(
       "--docx <path>",
       "Also write a formatted Word document of the findings to this path, suitable for sharing with a client or stakeholder",
@@ -70,7 +72,7 @@ export function registerCheckCommand(program: Command): void {
     .option("--html-back <href>", "Link the HTML page back to an index page at this relative URL")
     .action(async (path: string, opts: CheckOptions) => {
       try {
-        const { report, warnings } = await loadPbirFromFolder(path, { includeHidden: opts.includeHidden });
+        const { report, warnings } = await loadPbirFromFolder(path, { includeHidden: !opts.skipHiddenPages });
 
         const selection = { ...ALL_CHECKS };
         if (opts.category) {

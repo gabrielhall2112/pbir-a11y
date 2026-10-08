@@ -129,9 +129,10 @@ pbir-a11y check ./MyReport --json
 # Exit 0 unless something above "warn" is found (default: fail)
 pbir-a11y check ./MyReport --fail-on warn
 
-# Also check pages marked hidden-in-view-mode (drillthrough/tooltip pages),
-# which are skipped by default since end users don't land on them directly
-pbir-a11y check ./MyReport --include-hidden
+# Pages marked hidden-in-view-mode (drillthrough/tooltip pages, or pages
+# reached only through buttons/bookmarks) are checked by default, since users
+# still get there. Hidden *visuals* are never checked. To leave hidden pages out:
+pbir-a11y check ./MyReport --skip-hidden-pages
 
 # Write a formatted Word document of the findings, e.g. to hand to a client
 # or stakeholder alongside (or instead of) the terminal output. This uses the

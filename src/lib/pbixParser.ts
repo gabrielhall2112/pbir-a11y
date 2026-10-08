@@ -19,6 +19,8 @@ export interface ParsedVisual {
   h: number;
   z: number;
   altText: string | null;
+  /** Alt text comes from a DAX measure/field; its value isn't known statically. */
+  altTextIsDynamic: boolean;
   titleVisible: boolean;
   titleText: string | null;
   titleFontPt: number | null;
@@ -29,6 +31,10 @@ export interface ParsedVisual {
   categoryColor: string | null;
   axisColor: string | null;
   background: string | null;
+  /** Colour this visual paints over the area it covers (its own drawn
+   *  background, or a shape's fill), used as the backdrop for visuals
+   *  layered on top of it. null when it paints nothing. */
+  surfaceColor: string | null;
   // Axis titles  -  null means the visual has no axes (e.g. card, slicer)
   hasAxes: boolean;
   xAxisTitleVisible: boolean | null;
@@ -208,9 +214,80 @@ function extractColorLiterals(value: string, allowBare = false): string[] {
   return Array.from(matches);
 }
 
+// ---- Report theme ----
+// Colours can reference the theme ({ expr: { ThemeDataColor: { ColorId,
+// Percent } } }) instead of a hex literal, and backgrounds fall back to the
+// theme's visualStyles defaults. The theme is set for the duration of
+// buildReportFromLayout() so every colour lookup can resolve against it.
+
+export interface ResolvedTheme {
+  background?: string;
+  foreground?: string;
+  dataColors?: string[];
+  visualStyles?: Record<string, any>;
+}
+
+let activeTheme: ResolvedTheme | null = null;
+
+/** Custom theme over base theme; visualStyles merge per visual/object property. */
+export function mergeThemes(base: any, custom: any): ResolvedTheme {
+  const out: ResolvedTheme = { ...(base ?? {}), ...(custom ?? {}) };
+  const styles: Record<string, any> = {};
+  for (const src of [base?.visualStyles, custom?.visualStyles]) {
+    for (const [visual, selectors] of Object.entries<any>(src ?? {})) {
+      for (const [selector, objs] of Object.entries<any>(selectors ?? {})) {
+        for (const [obj, entries] of Object.entries<any>(objs ?? {})) {
+          const target = ((styles[visual] ??= {})[selector] ??= {});
+          const prev = Array.isArray(target[obj]) ? target[obj][0] : {};
+          const next = Array.isArray(entries) ? entries[0] : entries;
+          target[obj] = [{ ...prev, ...(next ?? {}) }];
+        }
+      }
+    }
+  }
+  out.visualStyles = styles;
+  return out;
+}
+
+/** Theme default properties for one object of a visual type (type-specific over "*"). */
+function themeStyle(visualType: string, objectName: string, useWildcard = true): Record<string, any> {
+  const vs = activeTheme?.visualStyles;
+  if (!vs) return {};
+  const wildcard = useWildcard ? vs["*"]?.["*"]?.[objectName]?.[0] : undefined;
+  const specific = vs[visualType]?.["*"]?.[objectName]?.[0];
+  return { ...(wildcard ?? {}), ...(specific ?? {}) };
+}
+
+function shadeHex(hex: string, percent: number): string {
+  const m = /^#?([0-9a-f]{6})/i.exec(hex);
+  if (!m || !percent) return m ? `#${m[1].toUpperCase()}` : hex;
+  const n = parseInt(m[1], 16);
+  const ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((c) =>
+    Math.round(percent > 0 ? c + (255 - c) * percent : c * (1 + percent)),
+  );
+  return "#" + ch.map((c) => Math.min(255, Math.max(0, c)).toString(16).padStart(2, "0")).join("").toUpperCase();
+}
+
+/** Theme colour slot as used by Power BI's colour picker: 0 = background
+ *  (White), 1 = foreground (Black), 2+ = dataColors; Percent lightens (+)
+ *  or darkens (-). */
+function themeDataColor(ref: any): string | null {
+  const id = Number(ref?.ColorId);
+  if (!Number.isInteger(id) || id < 0) return null;
+  const t = activeTheme;
+  const base =
+    id === 0 ? (t?.background ?? "#FFFFFF")
+      : id === 1 ? (t?.foreground ?? "#252423")
+        : t?.dataColors?.[id - 2] ?? null;
+  if (!base) return null;
+  const [hex] = normalizeColorLiteral(base, true);
+  return hex ? shadeHex(hex, Number(ref?.Percent) || 0) : null;
+}
+
 // Try to find a colour string inside a property-value tree.
 function findColor(node: any): string | null {
   if (node == null) return null;
+  if (typeof node === "object" && node.expr?.ThemeDataColor) return themeDataColor(node.expr.ThemeDataColor);
   if (typeof node === "string") {
     const exact = normalizeColorLiteral(node, true);
     if (exact[0]) return exact[0];
@@ -256,6 +333,11 @@ function findColors(node: any, acc = new Set<string>()): string[] {
     return Array.from(acc);
   }
   if (typeof node === "object") {
+    if (node.expr?.ThemeDataColor) {
+      const c = themeDataColor(node.expr.ThemeDataColor);
+      if (c) acc.add(c);
+      return Array.from(acc);
+    }
     if (node.solid?.color) findColors(node.solid.color, acc);
     if (typeof node.expr?.Literal?.Value === "string") {
       for (const match of normalizeColorLiteral(node.expr.Literal.Value, true)) acc.add(match);
@@ -341,13 +423,11 @@ function extractTabOrderState(...sources: any[]): { tabOrderIndex: number | null
   for (const source of sources) {
     if (source == null) continue;
     if (typeof source === "number") {
-      // Only the documented legacy sentinel (-1) means "explicitly hidden
-      // from tab order". Modern PBIR position.tabOrder can legitimately hold
-      // large or unusual values (e.g. a shape inserted before any manual
-      // reordering can carry a large negative default) that are still real,
-      // active positions in the tab sequence  -  they must not be silently
-      // treated as hidden, or decorative-but-focusable elements go undetected.
-      if (source === -1) return { tabOrderIndex: null, isHiddenFromTabOrder: true };
+      // Any negative value means "hidden from tab order". Power BI writes
+      // -1 for the first position and other negatives (-1001, -9999000...)
+      // that encode the old position; verified by hiding visuals in the
+      // Selection pane's tab order view and diffing visual.json.
+      if (source < 0) return { tabOrderIndex: null, isHiddenFromTabOrder: true };
       return { tabOrderIndex: Math.round(source), isHiddenFromTabOrder: false };
     }
     if (typeof source === "string") {
@@ -357,12 +437,12 @@ function extractTabOrderState(...sources: any[]): { tabOrderIndex: number | null
       }
       const parsed = Number(value);
       if (Number.isFinite(parsed)) {
-        if (parsed === -1) return { tabOrderIndex: null, isHiddenFromTabOrder: true };
+        if (parsed < 0) return { tabOrderIndex: null, isHiddenFromTabOrder: true };
         return { tabOrderIndex: Math.round(parsed), isHiddenFromTabOrder: false };
       }
       const cleaned = Number(value.replace(/[^\d.\-]/g, ""));
       if (Number.isFinite(cleaned)) {
-        if (cleaned === -1) return { tabOrderIndex: null, isHiddenFromTabOrder: true };
+        if (cleaned < 0) return { tabOrderIndex: null, isHiddenFromTabOrder: true };
         return { tabOrderIndex: Math.round(cleaned), isHiddenFromTabOrder: false };
       }
     }
@@ -489,7 +569,7 @@ function collectRenderedFontSizes(objects: any, skip: Set<string>, defaultOff: S
           if (typeof run?.value === "string" && run.value.trim() === "") continue;
           walk(run);
         }
-      } else if (k === "fontSize") {
+      } else if (k === "fontSize" || k === "textSize") {
         const n = findNumber(val);
         if (n != null) out.push(n);
       } else {
@@ -576,20 +656,39 @@ function blendHex(fg: string, bg: string, opacity: number): string {
   return "#" + mix.map((c) => c.toString(16).padStart(2, "0")).join("").toUpperCase();
 }
 
+interface BackgroundDefaults {
+  show: boolean;
+  transparency: number;
+  color: string;
+}
+
+/** Defaults for a background-like object: theme visualStyles, else the given fallbacks. */
+function backgroundDefaults(themeProps: Record<string, any>, show: boolean, transparency = 0): BackgroundDefaults {
+  return {
+    show: findBool(themeProps.show) ?? show,
+    transparency: findNumber(themeProps.transparency) ?? transparency,
+    color: findColor(themeProps.color) ?? activeTheme?.background ?? "#FFFFFF",
+  };
+}
+
 /** Resolve a background object to the colour actually seen, or null when not drawn. */
-function resolveBackground(entries: any, defaultOn: boolean, behind: string): string | null {
+function resolveBackground(entries: any, defaults: BackgroundDefaults, behind: string): string | null {
   const base = Array.isArray(entries) ? entries.find(isBaseEntry) : null;
   const props = base?.properties ?? {};
-  if (!(findBool(props.show) ?? defaultOn)) return null;
-  const color = findColor(props.color) ?? "#FFFFFF"; // theme default
-  const transparency = Math.min(100, Math.max(0, findNumber(props.transparency) ?? 0));
+  if (!(findBool(props.show) ?? defaults.show)) return null;
+  const color = findColor(props.color) ?? defaults.color;
+  const transparency = Math.min(100, Math.max(0, findNumber(props.transparency) ?? defaults.transparency));
   if (transparency >= 100) return null;
   return blendHex(color, behind, 1 - transparency / 100);
 }
 
-/** Page canvas colour as seen behind visuals (Power BI default: white). */
-export function resolvePageBackground(entries: any): string {
-  return resolveBackground(entries, true, "#FFFFFF") ?? "#FFFFFF";
+/** Page canvas colour as seen behind visuals: the page background over the
+ *  wallpaper (outspace). Many themes make the page background 100%
+ *  transparent by default, leaving the wallpaper visible. */
+export function resolvePageBackground(entries: any, outspaceEntries?: any): string {
+  const wallpaper =
+    resolveBackground(outspaceEntries, backgroundDefaults(themeStyle("page", "outspace", false), true), "#FFFFFF") ?? "#FFFFFF";
+  return resolveBackground(entries, backgroundDefaults(themeStyle("page", "background", false), true), wallpaper) ?? wallpaper;
 }
 
 // Visual types whose title / background are off unless the author turns them on.
@@ -664,7 +763,6 @@ function extractVisual(visualContainer: any, idx: number, pageBackground = "#FFF
   } else {
     titleVisible = true;
   }
-  if (titleText) titleVisible = titleVisible || true;
 
   // Whether the title is actually drawn: explicit show wins, otherwise the
   // Power BI default (off for slicers, cards, text boxes, shapes, images,
@@ -715,9 +813,25 @@ function extractVisual(visualContainer: any, idx: number, pageBackground = "#FFF
 
   // Background actually behind this visual's content: its own background if
   // shown and not fully transparent (blended), otherwise the page canvas.
+  // Shapes, text boxes, images, buttons and navigators have no background
+  // unless switched on; the theme's "*" wildcard doesn't change that, only a
+  // style written for that visual type does.
   const bgDefaultOn = !BACKGROUND_DEFAULT_OFF.some((p) => typeLc.includes(p));
-  const background =
-    resolveBackground(vcObjects.background ?? objects.background, bgDefaultOn, pageBackground) ?? pageBackground;
+  const bgDefaults = backgroundDefaults(themeStyle(String(single.visualType ?? ""), "background", bgDefaultOn), bgDefaultOn);
+  const ownBackground = resolveBackground(vcObjects.background ?? objects.background, bgDefaults, pageBackground);
+  // Provisional: visuals without their own background are re-resolved in
+  // extractPage against whatever is layered underneath them.
+  const background = ownBackground ?? pageBackground;
+  // Shapes, buttons and navigators paint their body fill (objects.fill)
+  // rather than a background.
+  const shapeFill = (["shape", "button", "navigator"].some((p) => typeLc.includes(p)) && typeLc !== "shapemap")
+    ? (() => {
+        const base = Array.isArray(objects.fill) ? objects.fill.find(isBaseEntry) : null;
+        const color = findColor(base?.properties?.fillColor);
+        return color ? resolveBackground(objects.fill, { show: true, transparency: 0, color }, ownBackground ?? pageBackground) : null;
+      })()
+    : null;
+  const surfaceColor = shapeFill ?? ownBackground;
 
   // Slicer header / card label: on by default and names the visual.
   let builtInLabelVisible: boolean | null = null;
@@ -742,8 +856,20 @@ function extractVisual(visualContainer: any, idx: number, pageBackground = "#FFF
     single.altText,
     visualContainer.altText,
   ];
+  // Alt text can also be driven by a DAX measure (expr.Measure etc. instead
+  // of a Literal). That's valid alt text whose value is only known at run
+  // time, so record which field drives it rather than a literal string.
   let altText: string | null = null;
+  let altTextIsDynamic = false;
   for (const a of altSources) {
+    const expr = a?.expr;
+    if (expr && typeof expr === "object" && !expr.Literal) {
+      const ref = collect(expr, (k) => k === "Measure" || k === "Column")[0];
+      const entity = ref?.Expression?.SourceRef?.Entity;
+      altText = ref?.Property ? `[dynamic: ${entity ? `${entity}[${ref.Property}]` : ref.Property}]` : "[dynamic]";
+      altTextIsDynamic = true;
+      break;
+    }
     const t = findText(a);
     if (t) {
       altText = t;
@@ -832,6 +958,7 @@ function extractVisual(visualContainer: any, idx: number, pageBackground = "#FFF
   }
   const fields = Array.from(fieldSet);
 
+
   const x = Number(visualContainer.x ?? 0);
   const y = Number(visualContainer.y ?? 0);
   const w = Number(visualContainer.width ?? 0);
@@ -840,7 +967,7 @@ function extractVisual(visualContainer: any, idx: number, pageBackground = "#FFF
 
   // Tab order extraction. Power BI stores it under
   //   singleVisual.objects.general[0].properties.tabOrder
-  // as a numeric Literal. -1 means "hidden from tab order" (decorative).
+  // as a numeric Literal. Any negative value means "hidden from tab order".
   // Also fall back to vcObjects.general or a top-level container field.
   const tabOrderState = extractTabOrderState(
     ...layoutPositionTabOrderSources(visualContainer, cfg),
@@ -870,6 +997,7 @@ function extractVisual(visualContainer: any, idx: number, pageBackground = "#FFF
     type: String(visualType),
     x, y, width: w, height: h, w, h, z,
     altText,
+    altTextIsDynamic,
     titleVisible,
     titleText,
     titleFontPt,
@@ -879,6 +1007,7 @@ function extractVisual(visualContainer: any, idx: number, pageBackground = "#FFF
     categoryColor,
     axisColor,
     background,
+    surfaceColor,
     hasAxes,
     xAxisTitleVisible,
     yAxisTitleVisible,
@@ -901,6 +1030,28 @@ function extractVisual(visualContainer: any, idx: number, pageBackground = "#FFF
   };
 }
 
+/**
+ * A visual whose own background is off shows whatever is drawn beneath it:
+ * often a coloured shape or panel rather than the page. Use the top-most
+ * lower-z visual that paints a colour under this visual's centre point.
+ */
+function resolveLayeredBackgrounds(visuals: ParsedVisual[]): ParsedVisual[] {
+  const painters = visuals.filter((v) => v.surfaceColor);
+  return visuals.map((v) => {
+    // Paints its own surface (background, or a shape's fill): its content sits on that.
+    if (v.surfaceColor) return v.surfaceColor === v.background ? v : { ...v, background: v.surfaceColor };
+    const cx = v.x + v.width / 2;
+    const cy = v.y + v.height / 2;
+    let best: ParsedVisual | null = null;
+    for (const o of painters) {
+      if (o === v || o.z >= v.z) continue;
+      if (cx < o.x || cx > o.x + o.width || cy < o.y || cy > o.y + o.height) continue;
+      if (!best || o.z > best.z) best = o;
+    }
+    return best ? { ...v, background: best.surfaceColor } : v;
+  });
+}
+
 export function extractPage(section: any, canvasW: number, canvasH: number): ParsedPage {
   const cfg = expand(section.config) ?? {};
   const visualContainers = (section.visualContainers ?? [])
@@ -912,7 +1063,10 @@ export function extractPage(section: any, canvasW: number, canvasH: number): Par
     }))
     // Legacy PBIX visual groups are containers with nothing to check.
     .filter((vc: any) => !(vc.config?.singleVisualGroup && !vc.config?.singleVisual));
-  const pageBackground = resolvePageBackground(section.background ?? cfg?.objects?.background);
+  const pageBackground = resolvePageBackground(
+    section.background ?? cfg?.objects?.background,
+    section.outspace ?? cfg?.objects?.outspace,
+  );
 
   const pageW = Number(section.width ?? canvasW);
   const pageH = Number(section.height ?? canvasH);
@@ -938,7 +1092,9 @@ export function extractPage(section: any, canvasW: number, canvasH: number): Par
     height: pageH,
     hidden: Boolean(cfg?.visibility === 1 || section.visibility === 1),
     pageTitleVisible,
-    visuals: normalisePowerBiLayoutTabOrder(visualContainers.map((vc: any, i: number) => extractVisual(vc, i, pageBackground))),
+    visuals: normalisePowerBiLayoutTabOrder(
+      resolveLayeredBackgrounds(visualContainers.map((vc: any, i: number) => extractVisual(vc, i, pageBackground))),
+    ),
   };
 }
 
@@ -1023,9 +1179,15 @@ export function buildReportFromLayout(
   });
 
   const sections = layout.sections ?? [];
-  const pages = sections
-    .map((s: any) => extractPage(s, canvasW, canvasH))
-    .filter((p: ParsedPage) => opts?.includeHidden || !p.hidden);
+  activeTheme = layout.resolvedTheme ?? null;
+  let pages: ParsedPage[];
+  try {
+    pages = sections
+      .map((s: any) => extractPage(s, canvasW, canvasH))
+      .filter((p: ParsedPage) => opts?.includeHidden || !p.hidden);
+  } finally {
+    activeTheme = null;
+  }
 
   return {
     fileName,

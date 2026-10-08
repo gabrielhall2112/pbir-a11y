@@ -63,7 +63,7 @@ There is no `--category` for this yet, so it's not something `check` will flag o
 - `--category <name>` - scope to one check (`contrast`, `altText`, `clutter`, `pageTitles`, `visualTitles`, `axisTitles`, `fontScaling`, `tabOrder`, `targetSize`, `customVisuals`) when you only touched one aspect of the report
 - `--page <name>` - scope to the page you just edited, to avoid re-reporting pre-existing issues elsewhere in the project as if they were new
 - `--fail-on warn` - treat warnings as blocking too (default only fails on `fail`-severity issues), useful before a publish step
-- `--include-hidden` - also check pages marked hidden-in-view-mode (e.g. drillthrough/tooltip pages). These are skipped by default since end users don't land on them directly, but if the report reaches them via drillthrough or bookmarks, their visuals still need auditing - use this flag when the user asks for a full/complete audit, not just the pages in normal navigation
+- `--skip-hidden-pages` - leave out pages marked hidden-in-view-mode. These are checked by default because buttons, bookmarks and drillthrough still take users there; hidden *visuals* are never checked. Only use this when the user explicitly wants normal-navigation pages only
 - `--docx <path>` - in addition to the normal output, write a formatted Word document of the findings to `<path>`. Use this when the user asks to "export", "share", or "present" the findings, e.g. to a client or stakeholder who won't be reading raw CLI/JSON output
 - Exit code: `0` clean, `1` issues found at or above `--fail-on` threshold, `2` couldn't read the project (bad path, unsupported format)
 
