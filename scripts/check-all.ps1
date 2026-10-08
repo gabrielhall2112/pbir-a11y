@@ -7,12 +7,15 @@
   Recursively finds every folder whose name ends in ".Report" and contains
   a "definition" file (any extension, e.g. definition.pbir), runs
   `pbir-a11y check` on each, and writes into a new timestamped
-  "outputs_<yyyy-MM-dd_HHmmss>" folder so repeated runs never collide:
-    <ReportName>.txt   human-readable findings
-    <ReportName>.json  machine-readable findings
-    <ReportName>.html  formatted results page (open in a browser)
-    summary_<yyyy-MM-dd_HHmmss>.csv   one row per report: name, path, score, counts, status
-    summary_<yyyy-MM-dd_HHmmss>.html  the same summary as a sortable page linking each report
+  "outputs_<yyyy-MM-dd_HHmmss>" folder so repeated runs never collide.
+  Results are grouped by the git repository each report lives in:
+    summary_<stamp>.csv / .html          all reports
+    <Repository>\
+      summary_<stamp>.csv / .html        this repository's reports only
+      <ReportName>.txt                   human-readable findings
+      <ReportName>.json                  machine-readable findings
+      <ReportName>.html                  formatted results page (open in a browser)
+  Reports outside any repository go in "(no repository)".
 
 .PARAMETER Root
   Folder to search. Defaults to the current directory.
@@ -127,13 +130,18 @@ Write-Host ""
 # Repository = the nearest parent folder containing ".git" (a folder, or a
 # file for worktrees/submodules). Blank if the report isn't in a repo.
 $repoCache = @{}
+$repoPaths = @{}
 function Get-RepoName([System.IO.DirectoryInfo]$dir) {
     $d = $dir
     $visited = @()
     while ($d) {
         if ($repoCache.ContainsKey($d.FullName)) { $name = $repoCache[$d.FullName]; break }
         $visited += $d.FullName
-        if (Test-Path -LiteralPath (Join-Path $d.FullName ".git")) { $name = $d.Name; break }
+        if (Test-Path -LiteralPath (Join-Path $d.FullName ".git")) {
+            $name = $d.Name
+            $repoPaths[$name] = $d.FullName
+            break
+        }
         $d = $d.Parent
     }
     if (-not $d) { $name = "" }
@@ -156,16 +164,19 @@ $i = 0
 foreach ($dir in $reports) {
     $i++
     $reportName = $dir.Name -creplace '\.Report$', ''
+    $repo = Get-RepoName $dir
+    $repoDir = Join-Path $OutputDir $(if ($repo) { $repo } else { "(no repository)" })
+    New-Item -ItemType Directory -Force -Path $repoDir | Out-Null
 
-    # Two reports can share a name in different folders; suffix _2, _3, ...
+    # Two reports can share a name in the same repository; suffix _2, _3, ...
     $fileBase = $reportName
     $n = 1
-    while ($usedNames.ContainsKey($fileBase.ToLower())) { $n++; $fileBase = "${reportName}_$n" }
-    $usedNames[$fileBase.ToLower()] = $true
+    while ($usedNames.ContainsKey("$repoDir|$fileBase".ToLower())) { $n++; $fileBase = "${reportName}_$n" }
+    $usedNames["$repoDir|$fileBase".ToLower()] = $true
 
-    $txtPath  = Join-Path $OutputDir "$fileBase.txt"
-    $jsonPath = Join-Path $OutputDir "$fileBase.json"
-    $htmlPath = Join-Path $OutputDir "$fileBase.html"
+    $txtPath  = Join-Path $repoDir "$fileBase.txt"
+    $jsonPath = Join-Path $repoDir "$fileBase.json"
+    $htmlPath = Join-Path $repoDir "$fileBase.html"
 
     Write-Host "[$i/$($reports.Count)] $reportName" -ForegroundColor Cyan
     Write-Host "  reading:   $($dir.FullName)"
@@ -182,7 +193,7 @@ foreach ($dir in $reports) {
 
     $row = [ordered]@{
         ReportName = $reportName
-        Repository = Get-RepoName $dir
+        Repository = $repo
         ReportPath = $dir.FullName
         Score      = ""
         Rating     = ""
@@ -223,9 +234,21 @@ foreach ($dir in $reports) {
 $csvPath = Join-Path $OutputDir "summary_$stamp.csv"
 $summary | Export-Csv -Path $csvPath -NoTypeInformation -Encoding utf8
 
-Write-Host ("`nDone in {0:N1}s. Results in $OutputDir" -f $totalTimer.Elapsed.TotalSeconds)
 $summaryHtml = Join-Path $OutputDir "summary_$stamp.html"
 & node $cli summary-html $csvPath --out $summaryHtml --root $Root | Out-Null
+
+# One summary per repository folder, next to its report pages. Same file
+# name as the overall summary so each report's back link lands on it.
+foreach ($group in ($summary | Group-Object Repository)) {
+    $name = if ($group.Name) { $group.Name } else { "(no repository)" }
+    $repoDir = Join-Path $OutputDir $name
+    $repoRoot = if ($group.Name -and $repoPaths.ContainsKey($group.Name)) { $repoPaths[$group.Name] } else { $Root }
+    $repoCsv = Join-Path $repoDir "summary_$stamp.csv"
+    $group.Group | Export-Csv -Path $repoCsv -NoTypeInformation -Encoding utf8
+    & node $cli summary-html $repoCsv --out (Join-Path $repoDir "summary_$stamp.html") --root $repoRoot --title "Accessibility summary: $name" | Out-Null
+}
+
+Write-Host ("`nDone in {0:N1}s. Results in $OutputDir" -f $totalTimer.Elapsed.TotalSeconds)
 
 Write-Host "Summary: $csvPath"
 if (Test-Path $summaryHtml) { Write-Host "Summary page: $summaryHtml" }

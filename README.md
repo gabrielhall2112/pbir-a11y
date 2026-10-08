@@ -171,9 +171,20 @@ pbir-a11y check ./MyReport --json > results.json
 
 `scripts/check-all.ps1` finds every `*.Report` folder (with a `definition`
 file) under a directory, checks each one, and writes a timestamped
-`outputs_<yyyy-MM-dd_HHmmss>` folder containing per-report `.txt`, `.json`
-and `.html` results, plus `summary_<stamp>.csv` and a sortable
-`summary_<stamp>.html` page that links to every report:
+`outputs_<yyyy-MM-dd_HHmmss>` folder. Results are grouped by the git
+repository each report lives in:
+
+```
+outputs_<stamp>/
+  summary_<stamp>.csv / .html        all reports
+  <Repository>/
+    summary_<stamp>.csv / .html      this repository's reports only
+    <Report>.txt / .json / .html     per-report results
+```
+
+The summary pages are sortable and link to each report's HTML page, and each
+report page links back to its repository's summary. Reports outside any
+repository go in `(no repository)`.
 
 ```powershell
 .\scripts\check-all.ps1 -Root "C:\path\to\repos"
