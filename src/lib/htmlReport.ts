@@ -203,6 +203,21 @@ table.summary .path { color: var(--muted); font-size: 12px; overflow-wrap: anywh
 .stat { background: var(--chip); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 20px; }
 .stat .num { font-size: 2rem; font-weight: 700; line-height: 1.1; }
 .stat .label { color: var(--muted); font-size: 14px; }
+.stat.fail { background: hsl(0 60% 92%); border-color: hsl(0 65% 32%); }
+.stat.fail .num { color: hsl(0 70% 30%); }
+.stat.warn { background: hsl(46 75% 88%); border-color: hsl(45 85% 30%); }
+.stat.warn .num { color: hsl(42 90% 24%); }
+@media (prefers-color-scheme: dark) {
+  .stat.fail { background: hsl(0 50% 16%); border-color: hsl(0 60% 45%); }
+  .stat.fail .num { color: hsl(0 75% 72%); }
+  .stat.warn { background: hsl(45 50% 14%); border-color: hsl(45 75% 40%); }
+  .stat.warn .num { color: hsl(46 85% 62%); }
+}
+.overview { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 32px; align-items: start; }
+.overview .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (max-width: 760px) { .overview { grid-template-columns: minmax(0, 1fr); } }
+.band-chart-heading { font-size: 1rem; margin: 0 0 8px; }
+.band-chart { position: relative; height: 200px; }
 @media print {
   body { background: #fff; }
   .tabs, .filters { display: none; }
@@ -500,18 +515,28 @@ export function buildSummaryHtml(rows: SummaryRow[], opts: SummaryHtmlOptions = 
   scored.forEach((r) => bandCounts[scoreBand(Number(r.Score)).key]++);
   const errors = rows.length - scored.length;
 
-  const stat = (num: string | number, label: string) => `<div class="stat"><div class="num">${esc(num)}</div><div class="label">${esc(label)}</div></div>`;
+  const stat = (num: string | number, label: string, cls = "") => `<div class="stat ${cls}"><div class="num">${esc(num)}</div><div class="label">${esc(label)}</div></div>`;
   const stats = `<div class="stats">
     ${stat(rows.length, "Reports checked")}
     ${stat(avg ?? "-", "Average score")}
-    ${stat(sum("Failures"), "Failures")}
-    ${stat(sum("Warnings"), "Warnings")}
-    ${stat(bandCounts.critical, "Critical")}
-    ${stat(bandCounts.poor, "Poor")}
-    ${stat(bandCounts.attention, "Needs attention")}
-    ${stat(bandCounts.excellent, "Excellent")}
+    ${stat(sum("Failures"), "Failures", "fail")}
+    ${stat(sum("Warnings"), "Warnings", "warn")}
     ${errors ? stat(errors, "Could not be read") : ""}
   </div>`;
+
+  // Reports per rating band, drawn with Chart.js; the counts are also in the
+  // canvas label and fallback text for screen readers and offline viewing.
+  const bands = [
+    { label: "Excellent", count: bandCounts.excellent, color: "#2E7D32" },
+    { label: "Needs attention", count: bandCounts.attention, color: "#F2C12E" },
+    { label: "Poor", count: bandCounts.poor, color: "#EF7D22" },
+    { label: "Critical", count: bandCounts.critical, color: "#C62828" },
+  ];
+  const bandText = bands.map((b) => `${b.label} ${b.count}`).join(", ");
+  const bandChart = `<h3 class="band-chart-heading">Reports by rating</h3>
+    <div class="band-chart">
+      <canvas id="band-chart" role="img" aria-label="Reports by rating: ${esc(bandText)}">${esc(bandText)}</canvas>
+    </div>`;
 
   const cols: { key: string; label: string; num?: boolean }[] = [
     { key: "ReportName", label: "Report" },
@@ -551,7 +576,10 @@ export function buildSummaryHtml(rows: SummaryRow[], opts: SummaryHtmlOptions = 
     <p class="eyebrow" id="overview-heading">Overview</p>
     <p class="scale"><strong>Scale:</strong> ${SCALE_TEXT}</p>
     <hr>
-    ${stats}
+    <div class="overview">
+      ${stats}
+      <div>${bandChart}</div>
+    </div>
   </section>
   <section class="card" aria-labelledby="reports-heading">
     <h2 id="reports-heading" style="margin-top:0">Reports</h2>
@@ -563,9 +591,44 @@ export function buildSummaryHtml(rows: SummaryRow[], opts: SummaryHtmlOptions = 
     </table>
     </div>
   </section>
-</main>`;
+</main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>`;
 
   const script = `
+(function () {
+  var canvas = document.getElementById("band-chart");
+  if (window.Chart && canvas) {
+    var bands = ${JSON.stringify(bands)};
+    var css = getComputedStyle(document.documentElement);
+    var fg = css.getPropertyValue("--fg").trim(), muted = css.getPropertyValue("--muted").trim(), grid = css.getPropertyValue("--border").trim();
+    new Chart(canvas, {
+      type: "bar",
+      data: {
+        labels: bands.map(function (b) { return b.label; }),
+        datasets: [{ data: bands.map(function (b) { return b.count; }), backgroundColor: bands.map(function (b) { return b.color; }), borderRadius: 6, maxBarThickness: 90 }]
+      },
+      options: {
+        maintainAspectRatio: false,
+        layout: { padding: { top: 22 } },
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: function (c) { return c.raw + " report" + (c.raw === 1 ? "" : "s"); } } } },
+        scales: {
+          x: { ticks: { color: fg }, grid: { display: false } },
+          y: { beginAtZero: true, ticks: { color: muted, precision: 0 }, grid: { color: grid } }
+        }
+      },
+      plugins: [{
+        id: "counts",
+        afterDatasetsDraw: function (chart) {
+          var ctx = chart.ctx;
+          ctx.save();
+          ctx.fillStyle = fg; ctx.font = "700 14px Verdana, sans-serif"; ctx.textAlign = "center";
+          chart.getDatasetMeta(0).data.forEach(function (bar, i) { ctx.fillText(bands[i].count, bar.x, bar.y - 6); });
+          ctx.restore();
+        }
+      }]
+    });
+  }
+})();
 (function () {
   var tbody = document.querySelector("table.summary tbody");
   var ths = document.querySelectorAll("table.summary th");
